@@ -28,10 +28,12 @@ jobs:
           [ "$TAG" = "$VER" ] || { echo "版本不一致：tag v$TAG vs bundle $VER"; exit 1; }
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: |
-            release/PDF骑缝章.zip
-            release/PDF骑缝章.dmg
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release delete "$TAG" --yes --cleanup-tag false || true
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            "release/PDF骑缝章.zip" "release/PDF骑缝章.dmg"
