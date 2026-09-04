@@ -4,6 +4,16 @@
 
 ![平台](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey) ![Swift](https://img.shields.io/badge/Swift-5.9-orange) ![License](https://img.shields.io/badge/license-MIT-green)
 
+## 界面预览
+
+| 盖章主界面 | 新建图章 |
+|---|---|
+| ![盖章主界面](screenshots/main-stamped.png) | ![新建图章](screenshots/seal-create.png) |
+
+| 初始界面 | |
+|---|---|
+| ![初始界面](screenshots/main-empty.png) | |
+
 ## 功能
 
 ### 骑缝章
