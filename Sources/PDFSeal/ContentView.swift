@@ -205,7 +205,8 @@ struct ContentView: View {
             let a = seals.aspect(for: inst.sealID)
             var c = FullStampConfig()
             c.anchor = inst.anchor
-            c.sizeRatio = CGFloat(inst.size)
+            let pageH = doc.pageSizes[c.range.lowerBound].height
+            c.sizeRatio = CGFloat(inst.heightCm * 28.3465 / pageH)
             c.rotation = CGFloat(inst.rotation)
             c.range = inst.effectiveRange(pageCount: doc.pageCount)
             for var pl in StampGeometry.full(config: c,

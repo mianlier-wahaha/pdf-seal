@@ -13,6 +13,7 @@ struct PendingImport: Identifiable {
 struct SealCreateSheet: View {
     @EnvironmentObject private var seals: SealStore
     @EnvironmentObject private var settings: StampSettings
+    @EnvironmentObject private var doc: DocumentStore
     let pending: PendingImport
     let onFinished: () -> Void
 
@@ -143,8 +144,10 @@ struct SealCreateSheet: View {
         clampSize()
         let finalName = name.trimmingCharacters(in: .whitespaces)
         seals.addProcessedSeal(name: finalName.isEmpty ? L("印章") : finalName, cgImage: cg)
-        // 创建时即固化该章的默认物理尺寸（cm）
+        // 创建时固化该章的默认物理尺寸（cm），并立即套用到当前会话
         seals.fixPhysicalSize(widthCm: widthCm, heightCm: heightCm, for: seals.selectedID)
+        settings.applySealPhysicalSize(widthCm: widthCm, heightCm: heightCm,
+                                       pageHeightPt: doc.pageSizes.first?.height)
         onFinished()
     }
 

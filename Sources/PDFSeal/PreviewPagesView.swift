@@ -253,10 +253,12 @@ struct PagePreview: View {
     private func fullStampOverlays(displayH: CGFloat) -> some View {
         ForEach(settings.fullStamps) { inst in
             if let seal = seals.image(for: inst.sealID) {
-                let aspect = seals.aspect(for: inst.sealID)
                 if inst.covers(index, pageCount: settings.pageCount) {
-                    let h = inst.size * displayH
-                    let w = h * aspect
+                    // 物理尺寸 → 当前页显示像素
+                    let pagePt = index < doc.pageSizes.count ? doc.pageSizes[index] : CGSize(width: 595, height: 842)
+                    let cmScale = displayW / max(pagePt.width, 1)   // 显示像素 / pt
+                    let w = CGFloat(inst.widthCm * 28.3465) * cmScale
+                    let h = CGFloat(inst.heightCm * 28.3465) * cmScale
                     let x = inst.anchor.x * displayW - w / 2
                     let y = inst.anchor.y * displayH - h / 2
                     if inst.removedPages.contains(index) {
@@ -344,31 +346,31 @@ struct PagePreview: View {
                     resizeUndoID = inst.id
                 }
                 let aspect = seals.aspect(for: inst.sealID)
+                let pageH = index < doc.pageSizes.count ? doc.pageSizes[index].height : 842
                 let sx: CGFloat = (corner == 0 || corner == 2) ? -1 : 1
                 let sy: CGFloat = (corner == 0 || corner == 1) ? -1 : 1
                 let oppX = cx - sx * w / 2
                 let oppY = cy - sy * h / 2
-                var frac = max(24, abs(v.location.y - oppY)) / displayH
-                frac = min(max(frac, 0.05), 0.9)
-                let newH = CGFloat(frac) * displayH
+                let newH = max(24, abs(v.location.y - oppY))
                 let newW = max(24, newH * aspect)
+                let newHcm = Double(newH / displayH * pageH / 28.3465)
+                let newWcm = newHcm * Double(aspect)
                 let newCx = oppX + sx * newW / 2
                 let newCy = oppY + sy * newH / 2
-                settings.fullStamps[i].size = Double(frac)
+                settings.fullStamps[i].heightCm = newHcm
+                settings.fullStamps[i].widthCm = newWcm
                 settings.fullStamps[i].anchor = CGPoint(
                     x: min(max(newCx / displayW, 0.02), 0.98),
                     y: min(max(newCy / displayH, 0.02), 0.98))
             }
             .onEnded { _ in
                 resizeUndoID = nil
-                // 缩放结束：按当前页实际尺寸换算成 cm 固化到该章（下次添加沿用）
-                if let cur = settings.selectedInstance,
-                   index < doc.pageSizes.count {
-                    let ph = doc.pageSizes[index].height
-                    let hCm = Double(cur.size * ph / 28.3465)
-                    let wCm = hCm * Double(seals.aspect(for: cur.sealID))
-                    settings.fullSize = cur.size
-                    seals.fixPhysicalSize(widthCm: wCm, heightCm: hCm, for: cur.sealID)
+                // 缩放结束：物理尺寸固化到该章（下次添加沿用）
+                if let cur = settings.selectedInstance {
+                    settings.fullWidthCm = cur.widthCm
+                    settings.fullHeightCm = cur.heightCm
+                    seals.fixPhysicalSize(widthCm: cur.widthCm, heightCm: cur.heightCm,
+                                          for: cur.sealID)
                 }
             }
     }

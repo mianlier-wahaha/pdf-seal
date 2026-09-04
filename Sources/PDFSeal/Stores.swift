@@ -193,7 +193,8 @@ final class SealStore: ObservableObject {
 /// 章实例状态快照（撤销用）
 struct FullStampSnapshot: Equatable {
     var anchor: CGPoint
-    var size: Double
+    var widthCm: Double
+    var heightCm: Double
     var rotation: Double
     var opacity: Double
 }
@@ -203,7 +204,8 @@ struct FullStampInstance: Identifiable, Equatable {
     let id: UUID
     let sealID: UUID           // 该章所用的印章（添加时锁定，切换印章库不影响）
     var anchor: CGPoint        // 章中心，归一化（原点左上）
-    var size: Double           // 章高占页高比例
+    var widthCm: Double        // 章宽（物理 cm）
+    var heightCm: Double       // 章高（物理 cm）
     var rotation: Double       // 度
     var opacity: Double
     var allPages: Bool
@@ -262,7 +264,8 @@ final class StampSettings: ObservableObject {
 
     // 正文章模板（「添加」时的初始选项）
     @Published var fullAnchor: CGPoint = CGPoint(x: 0.75, y: 0.85)
-    @Published var fullSize: Double = 0.18
+    @Published var fullWidthCm: Double = 4.0
+    @Published var fullHeightCm: Double = 4.0
     @Published var fullRotation: Double = 0
     @Published var fullOpacity: Double = 0.9
     @Published var fullAllPages = false
@@ -303,8 +306,9 @@ final class StampSettings: ObservableObject {
     func pushUndo(_ id: UUID) {
         guard let inst = fullStamps.first(where: { $0.id == id }) else { return }
         var stack = undoStacks[id] ?? []
-        stack.append(FullStampSnapshot(anchor: inst.anchor, size: inst.size,
-                                       rotation: inst.rotation, opacity: inst.opacity))
+        stack.append(FullStampSnapshot(anchor: inst.anchor, widthCm: inst.widthCm,
+                                       heightCm: inst.heightCm, rotation: inst.rotation,
+                                       opacity: inst.opacity))
         if stack.count > 50 { stack.removeFirst() }
         undoStacks[id] = stack
     }
@@ -316,7 +320,8 @@ final class StampSettings: ObservableObject {
               let i = fullStamps.firstIndex(where: { $0.id == id }) else { return false }
         undoStacks[id] = stack
         fullStamps[i].anchor = snap.anchor
-        fullStamps[i].size = snap.size
+        fullStamps[i].widthCm = snap.widthCm
+        fullStamps[i].heightCm = snap.heightCm
         fullStamps[i].rotation = snap.rotation
         fullStamps[i].opacity = snap.opacity
         return true
@@ -353,13 +358,15 @@ final class StampSettings: ObservableObject {
         qifengStamps[i].removedPages.remove(pageIndex)
     }
 
-    /// 选中章变化时，把该章固定的物理尺寸换算成当前文档的页高比例
-    /// 1cm = 72 / 2.54 ≈ 28.3465 pt
+    /// 选中章变化时，套用该章固定的物理尺寸（cm）
+    /// 1cm = 72 / 2.54 ≈ 28.3465 pt；骑缝章尺寸按当前文档页高换算为比例
     func applySealPhysicalSize(widthCm: Double?, heightCm: Double?, pageHeightPt: CGFloat?) {
-        guard let hC = heightCm, let ph = pageHeightPt, ph > 0 else { return }
-        let frac = Double(CGFloat(hC * 28.3465) / ph)
-        qifengSize = frac
-        fullSize = frac
+        guard let wC = widthCm, let hC = heightCm else { return }
+        fullWidthCm = wC
+        fullHeightCm = hC
+        if let ph = pageHeightPt, ph > 0 {
+            qifengSize = Double(CGFloat(hC * 28.3465) / ph)
+        }
     }
 
     var selectedInstance: FullStampInstance? {
@@ -374,7 +381,8 @@ final class StampSettings: ObservableObject {
         var inst = FullStampInstance(id: UUID(),
                                      sealID: sealID,
                                      anchor: anchor ?? fullAnchor,
-                                     size: fullSize,
+                                     widthCm: fullWidthCm,
+                                     heightCm: fullHeightCm,
                                      rotation: fullRotation,
                                      opacity: fullOpacity,
                                      allPages: fullAllPages,
@@ -387,14 +395,6 @@ final class StampSettings: ObservableObject {
         }
         fullStamps.append(inst)
         selectedFullStampID = inst.id
-    }
-
-    /// 拖角缩放后更新实例尺寸（并固化到该章的默认尺寸）
-    func setInstanceSize(_ size: Double, of id: UUID) {
-        guard let i = fullStamps.firstIndex(where: { $0.id == id }) else { return }
-        fullStamps[i].size = size
-        fullSize = size
-        selectedFullStampID = id
     }
 
     func removeFullStamp(_ id: UUID) {
