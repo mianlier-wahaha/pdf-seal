@@ -6,6 +6,8 @@
 
 ![平台](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey) ![Swift](https://img.shields.io/badge/Swift-5.9-orange) ![License](https://img.shields.io/badge/license-MIT-green)
 
+[更新日志](CHANGELOG.md)
+
 ## 界面预览
 
 | 盖章主界面 | 新建图章 |
