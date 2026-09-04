@@ -17,10 +17,10 @@ final class DocumentStore: ObservableObject {
 
     func load(_ url: URL) {
         guard url.pathExtension.lowercased() == "pdf" else {
-            loadError = "仅支持 PDF 文件"; return
+            loadError = L("仅支持 PDF 文件"); return
         }
         guard let d = PDFDocument(url: url), d.pageCount > 0 else {
-            loadError = "无法打开 PDF（可能已加密或损坏）"; return
+            loadError = L("无法打开 PDF（可能已加密或损坏）"); return
         }
         self.url = url
         document = d
@@ -97,7 +97,7 @@ final class SealStore: ObservableObject {
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         guard let img = NSImage(contentsOf: url),
               let cg = cgPixel(img) else {
-            importError = "无法读取图片，请使用 PNG/JPG"; return
+            importError = L("无法读取图片，请使用 PNG/JPG"); return
         }
         let name = url.deletingPathExtension().lastPathComponent
         addProcessedSeal(name: name.isEmpty ? "印章" : name, cgImage: cg)
@@ -107,14 +107,14 @@ final class SealStore: ObservableObject {
     func addProcessedSeal(name: String, cgImage: CGImage) {
         let rep = NSBitmapImageRep(cgImage: cgImage)
         guard let png = rep.representation(using: .png, properties: [:]) else {
-            importError = "保存印章失败"; return
+            importError = L("保存印章失败"); return
         }
         let id = UUID()
         let file = "\(id.uuidString).png"
         do {
             try png.write(to: dir.appendingPathComponent(file), options: .atomic)
         } catch {
-            importError = "保存印章失败：\(error.localizedDescription)"; return
+            importError = LF("保存印章失败：%@", error.localizedDescription); return
         }
         seals.append(SealItem(id: id, name: name, file: file,
                               widthCm: nil, heightCm: nil))

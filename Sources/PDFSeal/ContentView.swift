@@ -35,15 +35,15 @@ struct ContentView: View {
             openPDF(url)
             return true
         }
-        .alert("出错了", isPresented: .init(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
-            Button("好", role: .cancel) {}
+        .alert(L("出错了"), isPresented: .init(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
+            Button(L("好"), role: .cancel) {}
         } message: { Text(errorText ?? "") }
         .onReceive(doc.$loadError) { _ in if let e = doc.loadError { errorText = e; doc.loadError = nil } }
         .onReceive(seals.$importError) { _ in if let e = seals.importError { errorText = e; seals.importError = nil } }
-        .confirmationDialog("是否确认关闭？", isPresented: $showCloseConfirm,
+        .confirmationDialog(L("是否确认关闭？"), isPresented: $showCloseConfirm,
                             titleVisibility: .visible) {
-            Button("取消", role: .cancel) {}
-            Button("确定") { closeDoc() }
+            Button(L("取消"), role: .cancel) {}
+            Button(L("确定")) { closeDoc() }
         }
         .onAppear {
             // 启动时套用上次所用章的固定物理尺寸
@@ -90,7 +90,7 @@ struct ContentView: View {
         doc.load(url)
         if scoped { url.stopAccessingSecurityScopedResource() }
         settings.syncPageCount(doc.pageCount)
-        statusText = doc.url == nil ? nil : "已载入 \(doc.pageCount) 页"
+        statusText = doc.url == nil ? nil : LF("已载入 %d 页", doc.pageCount)
     }
 
     /// NSOpenPanel 直调：SwiftUI fileImporter 在部分视图层级下不弹窗
@@ -115,14 +115,14 @@ struct ContentView: View {
 
     /// 保存：用盖章结果覆盖当前文件
     private func saveInPlace() {
-        guard doc.url != nil else { errorText = "请先打开 PDF"; return }
+        guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
         guard let base = try? buildPlacements() else {
-            errorText = "请先添加印章再保存"; return
+            errorText = L("请先添加印章再保存"); return
         }
         do {
             try PDFExporter.export(input: doc.url!, output: doc.url!,
                                    placements: base.placements, seals: base.seals)
-            statusText = "已保存：\(doc.displayName)"
+            statusText = LF("已保存：%@", doc.displayName)
         } catch {
             errorText = error.localizedDescription
         }
@@ -142,32 +142,32 @@ struct ContentView: View {
                 Image(systemName: "doc.badge.plus")
                     .font(.system(size: 44))
                     .foregroundStyle(.secondary)
-                Text("把 PDF 拖进来，或点「打开」选择文件")
+                Text(L("把 PDF 拖进来，或点「打开」选择文件"))
                     .foregroundStyle(.secondary)
-                Button("打开 PDF…") { pickPDF() }
+                Button(L("打开 PDF…")) { pickPDF() }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
-                    Button { pickPDF() } label: { Label("打开", systemImage: "doc") }
-                    Button { saveInPlace() } label: { Label("保存", systemImage: "arrow.down.doc") }
+                    Button { pickPDF() } label: { Label(L("打开"), systemImage: "doc") }
+                    Button { saveInPlace() } label: { Label(L("保存"), systemImage: "arrow.down.doc") }
                         .disabled(doc.document == nil || seals.selectedID == nil)
-                    Button { exportPDF() } label: { Label("另存为", systemImage: "square.and.arrow.down") }
+                    Button { exportPDF() } label: { Label(L("另存为"), systemImage: "square.and.arrow.down") }
                         .disabled(doc.document == nil || seals.selectedID == nil)
-                    Button { showCloseConfirm = true } label: { Label("关闭", systemImage: "xmark.circle") }
+                    Button { showCloseConfirm = true } label: { Label(L("关闭"), systemImage: "xmark.circle") }
                         .disabled(doc.document == nil)
                     Spacer()
                     Text("\(doc.displayName) · \(doc.pageCount) 页")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button { showJigsaw = true } label: { Label("拼合校验", systemImage: "square.on.square") }
+                    Button { showJigsaw = true } label: { Label(L("拼合校验"), systemImage: "square.on.square") }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
                 Divider()
-                PreviewPagesView()
+                PreviewPagesView(statusText: statusText)
             }
         }
     }
@@ -224,19 +224,19 @@ struct ContentView: View {
     }
 
     private func exportPDF() {
-        guard doc.url != nil else { errorText = "请先打开 PDF"; return }
-        guard let base = try? buildPlacements() else { errorText = "请先添加印章再导出"; return }
+        guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
+        guard let base = try? buildPlacements() else { errorText = L("请先添加印章再导出"); return }
         let panel = NSSavePanel()
         let stem = doc.url!.deletingPathExtension().lastPathComponent
         panel.directoryURL = doc.url!.deletingLastPathComponent()   // 默认原文件所在文件夹
-        panel.nameFieldStringValue = "\(stem)-骑缝章.pdf"
+        panel.nameFieldStringValue = "\(stem)-\(L("文件名后缀")).pdf"
         panel.allowedContentTypes = [.pdf]
         panel.beginSheetModal(for: NSApp.mainWindow!) { resp in
             guard resp == .OK, let target = panel.url else { return }
             do {
                 try PDFExporter.export(input: doc.url!, output: target,
                                        placements: base.placements, seals: base.seals)
-                statusText = "已导出：\(target.lastPathComponent)"
+                statusText = LF("已导出：%@", target.lastPathComponent)
             } catch {
                 errorText = error.localizedDescription
             }

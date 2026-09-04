@@ -10,20 +10,20 @@ struct SealLibraryView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("印章库").font(.headline)
+                Text(L("印章库")).font(.headline)
                 Spacer()
                 Button { pickSealImage() } label: {
                     Image(systemName: "plus.circle.fill")
                 }
                 .buttonStyle(.borderless)
-                .help("导入印章图片（PNG / JPG）")
+                .help(L("导入印章图片（PNG / JPG）"))
             }
             .padding(12)
 
             if seals.seals.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "seal").font(.system(size: 30)).foregroundStyle(.secondary)
-                    Text("还没有印章\n点右上角 + 导入章图").font(.caption)
+                    Text(L("还没有印章\n点右上角 + 导入章图")).font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
@@ -41,7 +41,7 @@ struct SealLibraryView: View {
                                                                pageHeightPt: doc.pageSizes.first?.height)
                             }
                             .contextMenu {
-                                Button("删除", role: .destructive) { seals.delete(item) }
+                                Button(L("删除"), role: .destructive) { seals.delete(item) }
                             }
                     }
                 }
@@ -62,7 +62,7 @@ struct SealLibraryView: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.png, .jpeg, .image]
-        panel.message = "选择印章图片（扫描或拍照的章图均可）"
+        panel.message = L("选择印章图片（扫描或拍照的章图均可）")
         let handle: (URL) -> Void = { url in
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }

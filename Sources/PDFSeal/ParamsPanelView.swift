@@ -9,9 +9,9 @@ struct ParamsPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                Section("骑缝章") {
+                Section(L("骑缝章")) {
                     Picker("缝位", selection: $settings.edge) {
-                        ForEach(SeamEdge.allCases) { e in Text(e.label).tag(e) }
+                        ForEach(SeamEdge.allCases) { e in Text(L(e.label)).tag(e) }
                     }
                     .pickerStyle(.segmented)
                     rangeControls(all: $settings.allPages,
@@ -19,20 +19,20 @@ struct ParamsPanelView: View {
                                   end: $settings.rangeEnd)
                     // 拖动实时调整最新一条骑缝章的上下位置，同时作为下一条的默认偏移
                     HStack(spacing: 8) {
-                        Text("上").font(.caption).foregroundStyle(.secondary)
+                        Text(L("上")).font(.caption).foregroundStyle(.secondary)
                         OffsetSlider(value: settings.qifengOffset) { v in
                             settings.qifengOffset = v
                             if let last = settings.qifengStamps.indices.last {
                                 settings.qifengStamps[last].offset = v
                             }
                         }
-                        Text("下").font(.caption).foregroundStyle(.secondary)
+                        Text(L("下")).font(.caption).foregroundStyle(.secondary)
                     }
                     HStack(spacing: 10) {
                         Button {
                             settings.addQifengStamp(sealID: seals.selectedID)
                         } label: {
-                            Label("添加", systemImage: "plus.circle.fill")
+                            Label(L("添加"), systemImage: "plus.circle.fill")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
@@ -41,18 +41,18 @@ struct ParamsPanelView: View {
                             Button(role: .destructive) {
                                 settings.removeAllQifengStamps()
                             } label: {
-                                Label("移除全部", systemImage: "trash")
+                                Label(L("移除全部"), systemImage: "trash")
                             }
                         }
                     }
                     if !settings.qifengStamps.isEmpty {
-                        Text("已添加 \(settings.qifengStamps.count) 条骑缝章；调整本滑杆后点「添加」可错开上下位置")
+                        Text(LF("已添加 %d 条骑缝章；调整本滑杆后点「添加」可错开上下位置", settings.qifengStamps.count))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
 
-                Section("正文章") {
-                    Text("添加一枚按当前选项盖章的章；可多次添加多枚。添加后点击页面落位、拖动微调、右键章可删除")
+                Section(L("正文章")) {
+                    Text(L("添加一枚按当前选项盖章的章；可多次添加多枚。添加后点击页面落位、拖动微调、右键章可删除"))
                         .font(.caption).foregroundStyle(.secondary)
                     rangeControls(all: $settings.fullAllPages,
                                   start: $settings.fullRangeStart,
@@ -61,7 +61,7 @@ struct ParamsPanelView: View {
                         Button {
                             settings.addFullStamp(sealID: seals.selectedID)
                         } label: {
-                            Label("添加", systemImage: "plus.circle.fill")
+                            Label(L("添加"), systemImage: "plus.circle.fill")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.borderedProminent)
@@ -70,12 +70,12 @@ struct ParamsPanelView: View {
                             Button(role: .destructive) {
                                 settings.removeAllFullStamps()
                             } label: {
-                                Label("移除全部", systemImage: "trash")
+                                Label(L("移除全部"), systemImage: "trash")
                             }
                         }
                     }
                     if !settings.fullStamps.isEmpty {
-                        Text("已添加 \(settings.fullStamps.count) 枚章；点击预览中的章可选中它")
+                        Text(LF("已添加 %d 枚章；点击预览中的章可选中它", settings.fullStamps.count))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -86,10 +86,10 @@ struct ParamsPanelView: View {
 
     private func rangeControls(all: Binding<Bool>, start: Binding<Int>, end: Binding<Int>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Toggle("全部页", isOn: all)
+            Toggle(L("全部页"), isOn: all)
             if !all.wrappedValue {
                 HStack {
-                    Text("页码")
+                    Text(L("页码"))
                     pageField(start)
                     Text("—")
                     pageField(end)

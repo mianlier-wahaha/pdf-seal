@@ -35,7 +35,7 @@ struct SealCreateSheet: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Text("新建图章").font(.headline)
+            Text(L("新建图章")).font(.headline)
 
             // 预览区：透明部分显示棋盘格
             ZStack {
@@ -47,7 +47,7 @@ struct SealCreateSheet: View {
                 if processing {
                     ProgressView()
                 } else if let cg = processed {
-                    Image(cg, scale: 1, label: Text("章预览"))
+                    Image(cg, scale: 1, label: Text(L("章预览")))
                         .resizable()
                         .scaledToFit()
                         .padding(12)
@@ -59,9 +59,9 @@ struct SealCreateSheet: View {
             }
 
             HStack(spacing: 14) {
-                Toggle("白色转成透明", isOn: $whiteToTransparent)
+                Toggle(L("白色转成透明"), isOn: $whiteToTransparent)
                 Spacer()
-                Text("尺寸(cm)").font(.callout)
+                Text(L("尺寸(cm)")).font(.callout)
                 TextField("宽", value: $widthCm, format: .number.precision(.fractionLength(0...1)))
                     .multilineTextAlignment(.center)
                     .frame(width: 54)
@@ -75,14 +75,14 @@ struct SealCreateSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { clampSize() }
                     .onChange(of: heightCm) { _ in syncAspect(fromWidth: false) }
-                Toggle("锁定比例", isOn: $lockAspect)
+                Toggle(L("锁定比例"), isOn: $lockAspect)
                     .font(.caption)
                     .toggleStyle(.checkbox)
             }
             .padding(.horizontal, 4)
 
             HStack(spacing: 10) {
-                Text("容错").font(.callout)
+                Text(L("容错")).font(.callout)
                     .padding(.leading, 4)
                 Slider(value: $tolerance, in: 0...100)
                     .disabled(!whiteToTransparent)
@@ -92,17 +92,17 @@ struct SealCreateSheet: View {
             }
 
             HStack {
-                Text("名称").font(.callout)
-                TextField("印章名称", text: $name)
+                Text(L("名称")).font(.callout)
+                TextField(L("印章名称"), text: $name)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: .infinity)
             }
 
             HStack {
                 Spacer()
-                Button("取消", role: .cancel) { onFinished() }
+                Button(L("取消"), role: .cancel) { onFinished() }
                     .keyboardShortcut(.cancelAction)
-                Button("创建") { create() }
+                Button(L("创建")) { create() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || processing)
@@ -142,7 +142,7 @@ struct SealCreateSheet: View {
         guard let cg = processed ?? baseCG else { onFinished(); return }
         clampSize()
         let finalName = name.trimmingCharacters(in: .whitespaces)
-        seals.addProcessedSeal(name: finalName.isEmpty ? "印章" : finalName, cgImage: cg)
+        seals.addProcessedSeal(name: finalName.isEmpty ? L("印章") : finalName, cgImage: cg)
         // 创建时即固化该章的默认物理尺寸（cm）
         seals.fixPhysicalSize(widthCm: widthCm, heightCm: heightCm, for: seals.selectedID)
         onFinished()
@@ -193,19 +193,21 @@ struct SealCreateSheet: View {
 /// 棋盘格背景（表示透明区域）
 struct Checkerboard: View {
     var cell: CGFloat = 10
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         Canvas { ctx, size in
             let cols = Int(ceil(size.width / cell)), rows = Int(ceil(size.height / cell))
+            let light: Double = scheme == .dark ? 0.28 : 0.82
             for row in 0..<rows {
                 for col in 0..<cols where (row + col) % 2 == 0 {
                     let rect = CGRect(x: CGFloat(col) * cell, y: CGFloat(row) * cell,
                                       width: cell, height: cell)
-                    ctx.fill(Path(rect), with: .color(Color(white: 0.82)))
+                    ctx.fill(Path(rect), with: .color(Color(white: light)))
                 }
             }
         }
-        .background(Color(white: 0.94))
+        .background(Color(white: scheme == .dark ? 0.18 : 0.94))
     }
 }
 

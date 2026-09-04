@@ -1,5 +1,7 @@
 # PDF 骑缝章
 
+[简体中文](README.md) | [English](README.en.md) | [繁體中文](README.zh-Hant.md)
+
 一个原生 macOS 应用，为 PDF 文件加盖**电子骑缝章**与**正文章**。SwiftUI + PDFKit/CoreGraphics 实现，零第三方依赖，纯本地处理，不上传任何文件。
 
 ![平台](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey) ![Swift](https://img.shields.io/badge/Swift-5.9-orange) ![License](https://img.shields.io/badge/license-MIT-green)

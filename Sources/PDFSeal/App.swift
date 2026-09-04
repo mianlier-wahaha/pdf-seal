@@ -9,7 +9,7 @@ struct PDFSealApp: App {
     @StateObject private var settings = StampSettings()
 
     var body: some Scene {
-        WindowGroup("PDF骑缝章") {
+        WindowGroup(L("PDF 骑缝章")) {
             ContentView()
                 .environmentObject(doc)
                 .environmentObject(seals)

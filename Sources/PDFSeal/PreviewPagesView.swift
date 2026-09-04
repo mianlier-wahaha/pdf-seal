@@ -5,6 +5,7 @@ import SealCore
 struct PreviewPagesView: View {
     @EnvironmentObject private var doc: DocumentStore
     @EnvironmentObject private var settings: StampSettings
+    var statusText: String? = nil
 
     @State private var zoomPercent: Double = 100
     @State private var pageInput: Int = 1
@@ -54,12 +55,19 @@ struct PreviewPagesView: View {
     /// 底部状态栏：缩放百分比（可输入+下拉预设）、页码跳转
     private func statusBar(proxy: ScrollViewProxy) -> some View {
         HStack(spacing: 14) {
+            if let statusText {
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             Spacer()
 
             HStack(spacing: 4) {
                 // 缩放输入框：下拉按钮集成在框内部右侧
                 HStack(spacing: 2) {
-                    TextField("缩放", value: $zoomPercent,
+                    TextField(L("缩放"), value: $zoomPercent,
                               format: .number.precision(.fractionLength(0...1)))
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.trailing)
@@ -93,7 +101,7 @@ struct PreviewPagesView: View {
             Divider().frame(height: 16)
 
             HStack(spacing: 4) {
-                TextField("页码", value: $pageInput,
+                TextField(L("页码"), value: $pageInput,
                           format: .number.grouping(.never))
                     .multilineTextAlignment(.trailing)
                     .frame(width: 46)
@@ -216,7 +224,7 @@ struct PagePreview: View {
                                 .offset(x: x, y: y)
                                 .contentShape(Rectangle())
                                 .contextMenu {
-                                    Button("恢复本页骑缝章条") {
+                                    Button(L("恢复本页骑缝章条")) {
                                         settings.restoreQifengPage(index, of: q.id)
                                     }
                                 }
@@ -226,10 +234,10 @@ struct PagePreview: View {
                                 .frame(width: w, height: h)
                                 .offset(x: x, y: y)
                                 .contextMenu {
-                                    Button("删除本页骑缝章条", role: .destructive) {
+                                    Button(L("删除本页骑缝章条"), role: .destructive) {
                                         settings.removeQifengPage(index, of: q.id)
                                     }
-                                    Button("删除此骑缝章（所有页）", role: .destructive) {
+                                    Button(L("删除此骑缝章（所有页）"), role: .destructive) {
                                         settings.removeQifengStamp(q.id)
                                     }
                                 }
@@ -260,7 +268,7 @@ struct PagePreview: View {
                             .offset(x: x, y: y)
                             .contentShape(Rectangle())
                             .contextMenu {
-                                Button("恢复本页章") {
+                                Button(L("恢复本页章")) {
                                     settings.restorePage(index, of: inst.id)
                                 }
                             }
@@ -273,10 +281,10 @@ struct PagePreview: View {
                                                isSelected: inst.id == settings.selectedFullStampID,
                                                displayW: displayW, displayH: displayH)
                             .contextMenu {
-                                Button("删除本页章", role: .destructive) {
+                                Button(L("删除本页章"), role: .destructive) {
                                     settings.removePage(index, of: inst.id)
                                 }
-                                Button("删除此章（所有页）", role: .destructive) {
+                                Button(L("删除此章（所有页）"), role: .destructive) {
                                     settings.removeFullStamp(inst.id)
                                 }
                             }

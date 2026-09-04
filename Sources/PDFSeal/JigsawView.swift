@@ -11,9 +11,9 @@ struct JigsawView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("模拟拼合校验")
+            Text(L("模拟拼合校验"))
                 .font(.headline)
-            Text("把每页边缘的章条按页序拼合，应能还原出右侧的完整印章")
+            Text(L("把每页边缘的章条按页序拼合，应能还原出右侧的完整印章"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 28) {
@@ -22,10 +22,10 @@ struct JigsawView: View {
             }
             .frame(maxHeight: .infinity)
             if !settings.allPages {
-                Text("当前页范围：第 \(settings.rangeStart) — \(settings.rangeEnd) 页（共 \(settings.rangeEnd - settings.rangeStart + 1) 条）")
+                Text(LF("当前页范围：第 %d — %d 页（共 %d 条）", settings.rangeStart, settings.rangeEnd, settings.rangeEnd - settings.rangeStart + 1))
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
+            Button(L("完成")) { dismiss() }.keyboardShortcut(.defaultAction)
         }
         .padding(24)
         .frame(width: 640, height: 460)
@@ -40,10 +40,10 @@ struct JigsawView: View {
                     .frame(height: 280)
                     .background(checker)
             } else {
-                Text("请先选择印章").foregroundStyle(.secondary)
+                Text(L("请先选择印章")).foregroundStyle(.secondary)
                     .frame(height: 280)
             }
-            Text("拼合结果").font(.caption).foregroundStyle(.secondary)
+            Text(L("拼合结果")).font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -58,7 +58,7 @@ struct JigsawView: View {
             } else {
                 Color.clear.frame(height: 280)
             }
-            Text("原始印章").font(.caption).foregroundStyle(.secondary)
+            Text(L("原始印章")).font(.caption).foregroundStyle(.secondary)
         }
     }
 
