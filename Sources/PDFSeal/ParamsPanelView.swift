@@ -1,0 +1,161 @@
+import SwiftUI
+import SealCore
+
+struct ParamsPanelView: View {
+    @EnvironmentObject private var doc: DocumentStore
+    @EnvironmentObject private var seals: SealStore
+    @EnvironmentObject private var settings: StampSettings
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section("骑缝章") {
+                    Picker("缝位", selection: $settings.edge) {
+                        ForEach(SeamEdge.allCases) { e in Text(e.label).tag(e) }
+                    }
+                    .pickerStyle(.segmented)
+                    rangeControls(all: $settings.allPages,
+                                  start: $settings.rangeStart,
+                                  end: $settings.rangeEnd)
+                    // 拖动实时调整最新一条骑缝章的上下位置，同时作为下一条的默认偏移
+                    HStack(spacing: 8) {
+                        Text("上").font(.caption).foregroundStyle(.secondary)
+                        OffsetSlider(value: settings.qifengOffset) { v in
+                            settings.qifengOffset = v
+                            if let last = settings.qifengStamps.indices.last {
+                                settings.qifengStamps[last].offset = v
+                            }
+                        }
+                        Text("下").font(.caption).foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 10) {
+                        Button {
+                            settings.addQifengStamp(sealID: seals.selectedID)
+                        } label: {
+                            Label("添加", systemImage: "plus.circle.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(doc.document == nil || seals.selectedID == nil)
+                        if !settings.qifengStamps.isEmpty {
+                            Button(role: .destructive) {
+                                settings.removeAllQifengStamps()
+                            } label: {
+                                Label("移除全部", systemImage: "trash")
+                            }
+                        }
+                    }
+                    if !settings.qifengStamps.isEmpty {
+                        Text("已添加 \(settings.qifengStamps.count) 条骑缝章；调整本滑杆后点「添加」可错开上下位置")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("正文章") {
+                    Text("添加一枚按当前选项盖章的章；可多次添加多枚。添加后点击页面落位、拖动微调、右键章可删除")
+                        .font(.caption).foregroundStyle(.secondary)
+                    rangeControls(all: $settings.fullAllPages,
+                                  start: $settings.fullRangeStart,
+                                  end: $settings.fullRangeEnd)
+                    HStack(spacing: 10) {
+                        Button {
+                            settings.addFullStamp(sealID: seals.selectedID)
+                        } label: {
+                            Label("添加", systemImage: "plus.circle.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(doc.document == nil || seals.selectedID == nil)
+                        if !settings.fullStamps.isEmpty {
+                            Button(role: .destructive) {
+                                settings.removeAllFullStamps()
+                            } label: {
+                                Label("移除全部", systemImage: "trash")
+                            }
+                        }
+                    }
+                    if !settings.fullStamps.isEmpty {
+                        Text("已添加 \(settings.fullStamps.count) 枚章；点击预览中的章可选中它")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+        }
+    }
+
+    private func rangeControls(all: Binding<Bool>, start: Binding<Int>, end: Binding<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("全部页", isOn: all)
+            if !all.wrappedValue {
+                HStack {
+                    Text("页码")
+                    pageField(start)
+                    Text("—")
+                    pageField(end)
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    private func pageField(_ value: Binding<Int>) -> some View {
+        TextField("", value: value, format: .number.grouping(.never))
+            .multilineTextAlignment(.center)
+            .frame(width: 52)
+            .textFieldStyle(.roundedBorder)
+            .onSubmit {
+                let total = max(doc.pageCount, 1)
+                value.wrappedValue = min(max(value.wrappedValue, 1), total)
+            }
+    }
+}
+
+/// 自绘滑杆：轨道铺满可用宽度（Form 对系统 Slider 有固有宽度限制）
+private struct OffsetSlider: View {
+    let value: Double          // -0.35...0.35
+    let onChanged: (Double) -> Void
+
+    @State private var dragging = false
+
+    private let range: ClosedRange<Double> = -0.35...0.35
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let knobX = CGFloat((value - range.lowerBound) / (range.upperBound - range.lowerBound)) * w
+            ZStack(alignment: .leading) {
+                // 轨道
+                Capsule()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(height: 4)
+                // 已选段
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: max(0, knobX), height: 4)
+                // 圆点
+                Circle()
+                    .fill(Color.white)
+                    .overlay { Circle().strokeBorder(Color.accentColor, lineWidth: 2) }
+                    .shadow(color: .black.opacity(0.15), radius: 1, y: 1)
+                    .frame(width: 18, height: 18)
+                    .position(x: knobX, y: geo.size.height / 2)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { d in
+                        dragging = true
+                        let frac = min(max(d.location.x / w, 0), 1)
+                        onChanged(range.lowerBound + Double(frac) * (range.upperBound - range.lowerBound))
+                    }
+                    .onEnded { _ in dragging = false }
+            )
+        }
+        .frame(height: 22)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+        }
+    }
+}

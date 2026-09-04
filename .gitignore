@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+build/
+release/
+verify/
+scripts/AppIcon.iconset/
+scripts/AppIcon.icns
+scripts/AppIcon_1024.png
+*.xcodeproj
+xcuserdata/
+*.log
+.github-key
+.github-key.pub
