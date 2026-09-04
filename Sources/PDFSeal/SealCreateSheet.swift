@@ -117,10 +117,33 @@ struct SealCreateSheet: View {
             if let b = baseCG, b.height > 0 {
                 imageAspect = Double(b.width) / Double(b.height)
             }
+            // 按图片元数据计算真实物理尺寸（cm）
+            let (w, h) = Self.realWorldCm(of: pending.image)
+            widthCm = min(max(w, 1), 20)
+            heightCm = min(max(h, 1), 20)
+            // 保证与底图比例一致
+            if lockAspect, imageAspect > 0 {
+                heightCm = min(max(widthCm / imageAspect, 1), 20)
+                widthCm = min(max(heightCm * imageAspect, 1), 20)
+            }
             await reprocess()
         }
         .task(id: whiteToTransparent) { await reprocess() }
         .task(id: tolerance) { await reprocess() }
+    }
+
+    /// 按图片的 DPI 元数据换算真实物理尺寸（cm）；
+    /// 无有效 DPI 信息（size≈像素数）时按 300 DPI（常规扫描精度）估算
+    nonisolated static func realWorldCm(of image: NSImage) -> (widthCm: Double, heightCm: Double) {
+        guard let rep = image.representations.first else { return (4, 4) }
+        let pw = Double(rep.pixelsWide), ph = Double(rep.pixelsHigh)
+        let sw = Double(image.size.width), sh = Double(image.size.height)
+        // NSImage.size = 像素 / DPI × 72；若与像素数几乎相等，说明 DPI 缺失（被当作 72 处理）
+        if abs(sw - pw) > 0.5, abs(sh - ph) > 0.5,
+           (1...60).contains(sw / 72 * 2.54), (1...60).contains(sh / 72 * 2.54) {
+            return (sw / 72 * 2.54, sh / 72 * 2.54)
+        }
+        return (pw / 300 * 2.54, ph / 300 * 2.54)
     }
 
     /// 防抖后重新处理预览图
