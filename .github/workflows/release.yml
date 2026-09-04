@@ -32,8 +32,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # GitHub 会剥掉附件名中的非 ASCII 字符，故用 ASCII 安全名上传
+          mkdir -p release/upload
+          cp "release/PDF骑缝章.zip" "release/upload/PDF-Seal.zip"
+          cp "release/PDF骑缝章.dmg" "release/upload/PDF-Seal.dmg"
           gh release delete "$TAG" --yes --cleanup-tag false || true
           gh release create "$TAG" \
             --title "$TAG" \
             --generate-notes \
-            "release/PDF骑缝章.zip" "release/PDF骑缝章.dmg"
+            "release/upload/PDF-Seal.zip" "release/upload/PDF-Seal.dmg"
