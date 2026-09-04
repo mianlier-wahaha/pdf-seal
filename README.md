@@ -47,8 +47,7 @@
 
 仓库内直接提供编译好的安装包（macOS Apple Silicon）：
 
-- [`PDF骑缝章.dmg`](release/PDF骑缝章.dmg) —— 标准安装映像，打开后拖入「应用程序」即可
-- [`PDF骑缝章.zip`](release/PDF骑缝章.zip) —— 免安装压缩包
+- [Releases 页面下载](https://github.com/mianlier-wahaha/pdf-seal/releases/latest) —— `PDF骑缝章.dmg`（标准安装映像，打开后拖入「应用程序」）或 `PDF骑缝章.zip`（免安装压缩包），由 CI 自动构建发布
 
 > 首次打开若提示无法验证开发者：右键点击应用 →「打开」，或在「系统设置 → 隐私与安全性」中允许。
 

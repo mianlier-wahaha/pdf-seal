@@ -1,0 +1,37 @@
+# 推送 v* 标签时自动：构建 → 打包 app/zip/dmg → 创建 GitHub Release 并挂载安装包
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14   # Apple Silicon macOS 构建机
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build & package
+        run: ./scripts/make_app.sh
+
+      - name: Verify bundle version matches tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PLIST="release/PDF骑缝章.app/Contents/Info.plist"
+          VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
+          echo "tag=$TAG bundle=$VER"
+          [ "$TAG" = "$VER" ] || { echo "版本不一致：tag v$TAG vs bundle $VER"; exit 1; }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release/PDF骑缝章.zip
+            release/PDF骑缝章.dmg
