@@ -373,6 +373,15 @@ final class StampSettings: ObservableObject {
         fullStamps.first { $0.id == selectedFullStampID } ?? fullStamps.last
     }
 
+    /// 调整指定章的物理尺寸（cm），范围 1–20
+    func setSize(widthCm: Double, heightCm: Double, of id: UUID) {
+        guard let i = fullStamps.firstIndex(where: { $0.id == id }) else { return }
+        fullStamps[i].widthCm = min(max(widthCm, 1), 20)
+        fullStamps[i].heightCm = min(max(heightCm, 1), 20)
+        fullWidthCm = fullStamps[i].widthCm
+        fullHeightCm = fullStamps[i].heightCm
+    }
+
     /// 「添加」按钮：按当前模板选项新增一枚章实例
     /// - Parameter sealID: 该章锁定的印章
     /// - Parameter pageIndex: 提供 时，新章仅覆盖该页并落在 anchor 处（点击落章）

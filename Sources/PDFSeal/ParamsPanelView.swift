@@ -6,6 +6,9 @@ struct ParamsPanelView: View {
     @EnvironmentObject private var seals: SealStore
     @EnvironmentObject private var settings: StampSettings
 
+    /// 正在用滑杆调尺寸的章（用于只在拖动开始时记一次撤销快照）
+    @State private var sizeDragID: UUID?
+
     var body: some View {
         VStack(spacing: 0) {
             Form {
@@ -78,6 +81,36 @@ struct ParamsPanelView: View {
                         Text(LF("已添加 %d 枚章；点击预览中的章可选中它", settings.fullStamps.count))
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    // 选中章：滑杆实时调整其物理大小（等比，松手固化到该章）
+                    if let inst = settings.selectedInstance {
+                        let aspect = seals.aspect(for: inst.sealID)
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(L("章体大小")).font(.callout)
+                                Spacer()
+                                Text(String(format: "%.1f × %.1f cm",
+                                            settings.selectedInstance?.widthCm ?? inst.widthCm,
+                                            settings.selectedInstance?.heightCm ?? inst.heightCm))
+                                    .font(.caption).monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            OffsetSlider(value: settings.selectedInstance?.heightCm ?? inst.heightCm,
+                                         range: 1...20,
+                                         onChanged: { v in
+                                if sizeDragID != inst.id {
+                                    settings.pushUndo(inst.id)   // 本次调整开始前记快照
+                                    sizeDragID = inst.id
+                                }
+                                settings.setSize(widthCm: v * Double(aspect), heightCm: v, of: inst.id)
+                            }, onEnded: {
+                                if let cur = settings.selectedInstance {
+                                    seals.fixPhysicalSize(widthCm: cur.widthCm, heightCm: cur.heightCm,
+                                                          for: cur.sealID)
+                                }
+                                sizeDragID = nil
+                            })
+                        }
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -113,12 +146,12 @@ struct ParamsPanelView: View {
 
 /// 自绘滑杆：轨道铺满可用宽度（Form 对系统 Slider 有固有宽度限制）
 private struct OffsetSlider: View {
-    let value: Double          // -0.35...0.35
+    let value: Double
+    var range: ClosedRange<Double> = -0.35...0.35
     let onChanged: (Double) -> Void
+    var onEnded: (() -> Void)? = nil
 
     @State private var dragging = false
-
-    private let range: ClosedRange<Double> = -0.35...0.35
 
     var body: some View {
         GeometryReader { geo in
@@ -149,7 +182,10 @@ private struct OffsetSlider: View {
                         let frac = min(max(d.location.x / w, 0), 1)
                         onChanged(range.lowerBound + Double(frac) * (range.upperBound - range.lowerBound))
                     }
-                    .onEnded { _ in dragging = false }
+                    .onEnded { _ in
+                        dragging = false
+                        onEnded?()
+                    }
             )
         }
         .frame(height: 22)

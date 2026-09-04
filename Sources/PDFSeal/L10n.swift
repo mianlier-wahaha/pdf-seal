@@ -29,6 +29,7 @@ enum L10n {
     static let en: [String: String] = [
         "PDF 骑缝章": "PDF Seal",
         "打开": "Open",
+        "章体大小": "Stamp Size",
         "保存": "Save",
         "另存为": "Save As",
         "关闭": "Close",
@@ -103,6 +104,7 @@ enum L10n {
     static let zhHant: [String: String] = [
         "PDF 骑缝章": "PDF 騎縫章",
         "打开": "打開",
+        "章体大小": "章體大小",
         "保存": "儲存",
         "另存为": "另存為",
         "关闭": "關閉",
