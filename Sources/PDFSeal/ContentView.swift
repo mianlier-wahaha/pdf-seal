@@ -81,6 +81,16 @@ struct ContentView: View {
                     return nil
                 }
             }
+            // Delete 键（kVK_Delete = 51）：移除选中的正文章。
+            // 仅拦截裸按的 Delete；带 cmd/option 的组合键放行给系统，避免与 macOS
+            // 「delete to start of line」「option-delete 按词删除」等编辑快捷键冲突。
+            if event.keyCode == 51,
+               !event.modifierFlags.contains(.command),
+               !event.modifierFlags.contains(.option),
+               let id = settings.selectedFullStampID {
+                settings.removeFullStamp(id)
+                return nil
+            }
             return event
         }
     }

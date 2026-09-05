@@ -373,6 +373,15 @@ final class StampSettings: ObservableObject {
         fullStamps.first { $0.id == selectedFullStampID } ?? fullStamps.last
     }
 
+    /// 选中章在 fullStamps 中的下标（按添加顺序，0-based）。
+    /// 当 selectedInstance 走的是 .last 兜底时也对应数组里实际的下标。
+    var selectedIndex: Int {
+        if let id = selectedFullStampID, let i = fullStamps.firstIndex(where: { $0.id == id }) {
+            return i
+        }
+        return max(0, fullStamps.count - 1)
+    }
+
     /// 调整指定章的物理尺寸（cm），范围 1–20
     func setSize(widthCm: Double, heightCm: Double, of id: UUID) {
         guard let i = fullStamps.firstIndex(where: { $0.id == id }) else { return }

@@ -70,6 +70,9 @@ enum L10n {
         "下": "Down",
         "添加": "Add",
         "移除全部": "Remove All",
+        "移除": "Remove",
+        "移除这枚章（Delete 键）": "Remove this stamp (Delete)",
+        "已选中第 %d 枚 / 共 %d 枚": "Stamp %d of %d selected",
         "正文章": "Body Stamps",
         "添加一枚按当前选项盖章的章；可多次添加多枚。添加后点击页面落位、拖动微调、右键章可删除":
             "Click Add to place a stamp with the current options — add as many as you need. After that: click to position, drag to fine-tune, right-click to delete.",
@@ -145,6 +148,9 @@ enum L10n {
         "下": "下",
         "添加": "新增",
         "移除全部": "全部移除",
+        "移除": "移除",
+        "移除这枚章（Delete 键）": "移除此印章（Delete 鍵）",
+        "已选中第 %d 枚 / 共 %d 枚": "已選取第 %d 枚 / 共 %d 枚",
         "正文章": "正文印章",
         "添加一枚按当前选项盖章的章；可多次添加多枚。添加后点击页面落位、拖动微调、右键章可删除":
             "每次「新增」會以目前選項放置一枚印章，可連續新增多枚。新增後點擊頁面落位、拖曳微調、右鍵章可刪除",

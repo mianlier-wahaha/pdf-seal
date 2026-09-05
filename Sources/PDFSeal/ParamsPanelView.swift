@@ -85,6 +85,21 @@ struct ParamsPanelView: View {
                     if let inst = settings.selectedInstance {
                         let aspect = seals.aspect(for: inst.sealID)
                         VStack(alignment: .leading, spacing: 6) {
+                            // 选中章信息行：当前第几枚/共几枚 + 移除按钮（Delete 键同效）
+                            HStack {
+                                Text(LF("已选中第 %d 枚 / 共 %d 枚",
+                                        settings.selectedIndex + 1,
+                                        settings.fullStamps.count))
+                                    .font(.callout)
+                                Spacer()
+                                Button(role: .destructive) {
+                                    settings.removeFullStamp(inst.id)
+                                } label: {
+                                    Label(L("移除"), systemImage: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .help(L("移除这枚章（Delete 键）"))
+                            }
                             HStack {
                                 Text(L("章体大小")).font(.callout)
                                 Spacer()
