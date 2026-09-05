@@ -273,7 +273,10 @@ final class StampSettings: ObservableObject {
     @Published var fullRangeEnd = 1
     // 已添加的正文章实例（可多枚）
     @Published var fullStamps: [FullStampInstance] = []
-    @Published var selectedFullStampID: UUID?
+    /// 多选：当前所有被选中章的 id 集合（唯一真相来源）
+    @Published var selectedFullStampIDs: Set<UUID> = []
+    /// 主选中（最后点击 / 添加的章），承载尺寸滑杆与缩放手柄的锚点
+    private var primaryID: UUID?
 
     /// 每枚章的撤销栈（交互前快照）
     private var undoStacks: [UUID: [FullStampSnapshot]] = [:]
@@ -285,7 +288,8 @@ final class StampSettings: ObservableObject {
         pageCount = 0
         qifengStamps = []
         fullStamps = []
-        selectedFullStampID = nil
+        selectedFullStampIDs = []
+        primaryID = nil
         undoStacks = [:]
     }
 
@@ -298,7 +302,8 @@ final class StampSettings: ObservableObject {
         fullRangeEnd = count
         qifengStamps = []
         fullStamps = []
-        selectedFullStampID = nil
+        selectedFullStampIDs = []
+        primaryID = nil
         undoStacks = [:]
     }
 
@@ -369,17 +374,57 @@ final class StampSettings: ObservableObject {
         }
     }
 
+    /// 主选中章（最后点击 / 添加的章）。用于尺寸滑杆与缩放手柄的锚点。
+    /// 普通点击 / 添加 = 仅它选中；⌘ 点击 = 在已有选择上累加 / 取消。
+    var selectedFullStampID: UUID? { primaryID }
+
     var selectedInstance: FullStampInstance? {
-        fullStamps.first { $0.id == selectedFullStampID } ?? fullStamps.last
+        guard let pid = primaryID else { return nil }
+        return fullStamps.first { $0.id == pid }
     }
 
-    /// 选中章在 fullStamps 中的下标（按添加顺序，0-based）。
-    /// 当 selectedInstance 走的是 .last 兜底时也对应数组里实际的下标。
+    /// 主选中章在 fullStamps 中的下标（按添加顺序，0-based）。
     var selectedIndex: Int {
-        if let id = selectedFullStampID, let i = fullStamps.firstIndex(where: { $0.id == id }) {
-            return i
+        guard let pid = primaryID, let i = fullStamps.firstIndex(where: { $0.id == pid }) else { return 0 }
+        return i
+    }
+
+    /// 当前选中的章数量
+    var selectedCount: Int { selectedFullStampIDs.count }
+
+    // MARK: - 多选操作
+
+    /// 普通点击 / 添加：仅选中这一枚（清空其余选中）
+    func selectOnly(_ id: UUID) {
+        selectedFullStampIDs = [id]
+        primaryID = id
+    }
+
+    /// ⌘ 点击：在已有选择上累加；若已选中则取消选中（切换）。
+    /// 取消的是主选中时，主选中顺延到其余选中章中最后添加的一枚。
+    func toggleSelection(_ id: UUID) {
+        if selectedFullStampIDs.contains(id) {
+            selectedFullStampIDs.remove(id)
+            if primaryID == id {
+                primaryID = remainingPrimary()
+            }
+        } else {
+            selectedFullStampIDs.insert(id)
+            primaryID = id
         }
-        return max(0, fullStamps.count - 1)
+    }
+
+    /// 取消全部选中（Esc）
+    func clearSelection() {
+        selectedFullStampIDs = []
+        primaryID = nil
+    }
+
+    /// 在剩余选中章里挑「最后添加」的一枚作为主选中
+    private func remainingPrimary() -> UUID? {
+        selectedFullStampIDs.compactMap { fid in
+            fullStamps.firstIndex(where: { $0.id == fid }).map { ($0, fid) }
+        }.max(by: { $0.0 < $1.0 })?.1
     }
 
     /// 调整指定章的物理尺寸（cm），范围 1–20
@@ -412,20 +457,32 @@ final class StampSettings: ObservableObject {
             inst.rangeEnd = p + 1
         }
         fullStamps.append(inst)
-        selectedFullStampID = inst.id
+        selectOnly(inst.id)
     }
 
     func removeFullStamp(_ id: UUID) {
         fullStamps.removeAll { $0.id == id }
         undoStacks[id] = nil
-        if selectedFullStampID == id {
-            selectedFullStampID = fullStamps.last?.id
+        selectedFullStampIDs.remove(id)
+        if primaryID == id {
+            primaryID = remainingPrimary()
         }
+    }
+
+    /// 移除当前选中的所有章
+    func removeSelectedFullStamps() {
+        for id in selectedFullStampIDs {
+            fullStamps.removeAll { $0.id == id }
+            undoStacks[id] = nil
+        }
+        selectedFullStampIDs = []
+        primaryID = nil
     }
 
     func removeAllFullStamps() {
         fullStamps = []
-        selectedFullStampID = nil
+        selectedFullStampIDs = []
+        primaryID = nil
         undoStacks = [:]
     }
 

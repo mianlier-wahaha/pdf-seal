@@ -78,51 +78,53 @@ struct ParamsPanelView: View {
                         }
                     }
                     if !settings.fullStamps.isEmpty {
-                        Text(LF("已添加 %d 枚章；点击预览中的章可选中它", settings.fullStamps.count))
+                        Text(LF("已添加 %d 枚章；点击预览中的章可选中它；按住 ⌘ 点击可累加选择多枚", settings.fullStamps.count))
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    // 选中章：滑杆实时调整其物理大小（等比，松手固化到该章）
-                    if let inst = settings.selectedInstance {
-                        let aspect = seals.aspect(for: inst.sealID)
+                    // 选中信息：计数 + 移除（多选时一并移除）；尺寸滑杆仅单选时显示
+                    if !settings.fullStamps.isEmpty {
+                        let count = settings.selectedFullStampIDs.count
                         VStack(alignment: .leading, spacing: 6) {
-                            // 选中章信息行：当前第几枚/共几枚 + 移除按钮（Delete 键同效）
                             HStack {
-                                Text(LF("已选中第 %d 枚 / 共 %d 枚",
-                                        settings.selectedIndex + 1,
-                                        settings.fullStamps.count))
+                                Text(LF("已选中 %d 枚 / 共 %d 枚", count, settings.fullStamps.count))
                                     .font(.callout)
                                 Spacer()
                                 Button(role: .destructive) {
-                                    settings.removeFullStamp(inst.id)
+                                    settings.removeSelectedFullStamps()
                                 } label: {
                                     Label(L("移除"), systemImage: "trash")
                                 }
-                                .help(L("移除这枚章（Delete 键）"))
+                                .disabled(count == 0)
+                                .help(L("移除选中的章（Delete 键）"))
                             }
-                            HStack {
-                                Text(L("章体大小")).font(.callout)
-                                Spacer()
-                                Text(String(format: "%.1f × %.1f cm",
-                                            settings.selectedInstance?.widthCm ?? inst.widthCm,
-                                            settings.selectedInstance?.heightCm ?? inst.heightCm))
-                                    .font(.caption).monospacedDigit()
-                                    .foregroundStyle(.secondary)
+                            // 仅单选时显示尺寸滑杆（调整主选中章的物理大小）
+                            if let inst = settings.selectedInstance, count == 1 {
+                                let aspect = seals.aspect(for: inst.sealID)
+                                HStack {
+                                    Text(L("章体大小")).font(.callout)
+                                    Spacer()
+                                    Text(String(format: "%.1f × %.1f cm",
+                                                settings.selectedInstance?.widthCm ?? inst.widthCm,
+                                                settings.selectedInstance?.heightCm ?? inst.heightCm))
+                                        .font(.caption).monospacedDigit()
+                                        .foregroundStyle(.secondary)
+                                }
+                                OffsetSlider(value: settings.selectedInstance?.heightCm ?? inst.heightCm,
+                                             range: 1...20,
+                                             onChanged: { v in
+                                    if sizeDragID != inst.id {
+                                        settings.pushUndo(inst.id)   // 本次调整开始前记快照
+                                        sizeDragID = inst.id
+                                    }
+                                    settings.setSize(widthCm: v * Double(aspect), heightCm: v, of: inst.id)
+                                }, onEnded: {
+                                    if let cur = settings.selectedInstance {
+                                        seals.fixPhysicalSize(widthCm: cur.widthCm, heightCm: cur.heightCm,
+                                                              for: cur.sealID)
+                                    }
+                                    sizeDragID = nil
+                                })
                             }
-                            OffsetSlider(value: settings.selectedInstance?.heightCm ?? inst.heightCm,
-                                         range: 1...20,
-                                         onChanged: { v in
-                                if sizeDragID != inst.id {
-                                    settings.pushUndo(inst.id)   // 本次调整开始前记快照
-                                    sizeDragID = inst.id
-                                }
-                                settings.setSize(widthCm: v * Double(aspect), heightCm: v, of: inst.id)
-                            }, onEnded: {
-                                if let cur = settings.selectedInstance {
-                                    seals.fixPhysicalSize(widthCm: cur.widthCm, heightCm: cur.heightCm,
-                                                          for: cur.sealID)
-                                }
-                                sizeDragID = nil
-                            })
                         }
                     }
                 }

@@ -280,7 +280,7 @@ struct PagePreview: View {
                                                w: w, h: h, x: x, y: y,
                                                rotation: inst.rotation,
                                                opacity: inst.opacity,
-                                               isSelected: inst.id == settings.selectedFullStampID,
+                                               isSelected: settings.selectedFullStampIDs.contains(inst.id),
                                                displayW: displayW, displayH: displayH)
                             .contextMenu {
                                 Button(L("删除本页章"), role: .destructive) {
@@ -301,9 +301,12 @@ struct PagePreview: View {
     }
 
     /// 选中章的四角控制点（独立成层，始终位于所有章之上）
+    /// 仅主选中（最后点击 / 添加的一枚）显示手柄；其余选中章仅显示选中框。
     @ViewBuilder
     private func selectedCornerHandles(displayH: CGFloat) -> some View {
-        if let sel = settings.fullStamps.first(where: { $0.id == settings.selectedFullStampID }),
+        if let pid = settings.selectedFullStampID,
+           let sel = settings.fullStamps.first(where: { $0.id == pid }),
+           settings.selectedFullStampIDs.contains(pid),
            sel.covers(index, pageCount: settings.pageCount),
            !sel.removedPages.contains(index) {
             // 与正文渲染同一套「物理尺寸 → 显示像素」换算
@@ -463,8 +466,13 @@ private struct FullStampDraggableView: View {
                     .onEnded { _ in dragStart = nil }
             )
             .onTapGesture {
-                // 点击章本身 = 选中它（拖动优先，纯点击才触发）
-                settings.selectedFullStampID = instanceID
+                // 点击章本身 = 选中它（拖动优先，纯点击才触发）。
+                // 按住 ⌘ 点击：在已有选择上累加 / 取消（多选），其余选中状态保留。
+                if NSEvent.modifierFlags.contains(.command) {
+                    settings.toggleSelection(instanceID)
+                } else {
+                    settings.selectOnly(instanceID)
+                }
             }
             .onHover { hovering in
                 if hovering {
