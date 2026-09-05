@@ -155,6 +155,24 @@ final class SealStore: ObservableObject {
         persist()
     }
 
+    // MARK: 印章库排序
+
+    /// 拖拽重排印章库顺序（列表内拖拽 / ⌘ 拖拽）
+    func moveSeals(fromOffsets indices: IndexSet, toOffset: Int) {
+        seals.move(fromOffsets: indices, toOffset: toOffset)
+        persist()
+    }
+
+    /// 选中印章后按 ↑/↓ 上下移动一位（越界自动忽略）
+    func moveSelectedSeal(by delta: Int) {
+        guard let id = selectedID,
+              let i = seals.firstIndex(where: { $0.id == id }) else { return }
+        let j = i + delta
+        guard (0..<seals.count).contains(j) else { return }
+        seals.swapAt(i, j)
+        persist()
+    }
+
     func image(for id: UUID?) -> NSImage? {
         guard let id, let item = seals.first(where: { $0.id == id }) else { return nil }
         if let img = cache[id] { return img }

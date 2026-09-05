@@ -72,6 +72,11 @@ struct ContentView: View {
             if let tv = NSApp.keyWindow?.firstResponder as? NSTextView, tv.isFieldEditor {
                 return event
             }
+            // ↑/↓（126/125）：印章库已选中某章时上下移动其顺序（与 Esc/Delete 同范围，非文本编辑时全局生效）
+            if (event.keyCode == 126 || event.keyCode == 125), seals.selectedID != nil {
+                seals.moveSelectedSeal(by: event.keyCode == 126 ? -1 : 1)
+                return nil
+            }
             let isEsc = event.keyCode == 53 || event.characters == "\u{1b}"
             if isEsc {
                 if !settings.selectedFullStampIDs.isEmpty {

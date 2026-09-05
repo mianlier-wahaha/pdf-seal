@@ -29,23 +29,32 @@ struct SealLibraryView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List {
-                    ForEach(seals.seals) { item in
-                        SealRow(item: item)
-                            .listRowBackground(item.id == seals.selectedID ? Color.accentColor.opacity(0.15) : .clear)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                seals.selectedID = item.id
-                                let d = seals.physicalSize(for: item.id)
-                                settings.applySealPhysicalSize(widthCm: d.widthCm, heightCm: d.heightCm,
-                                                               pageHeightPt: doc.pageSizes.first?.height)
-                            }
-                            .contextMenu {
-                                Button(L("删除"), role: .destructive) { seals.delete(item) }
-                            }
+                VStack(spacing: 0) {
+                    List {
+                        ForEach(seals.seals) { item in
+                            SealRow(item: item)
+                                .listRowBackground(item.id == seals.selectedID ? Color.accentColor.opacity(0.15) : .clear)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    seals.selectedID = item.id
+                                    let d = seals.physicalSize(for: item.id)
+                                    settings.applySealPhysicalSize(widthCm: d.widthCm, heightCm: d.heightCm,
+                                                                   pageHeightPt: doc.pageSizes.first?.height)
+                                }
+                                .contextMenu {
+                                    Button(L("删除"), role: .destructive) { seals.delete(item) }
+                                }
+                        }
+                        .onMove { seals.moveSeals(fromOffsets: $0, toOffset: $1) }
                     }
+                    .listStyle(.sidebar)
+                    Text(L("拖拽可排序；选中后按 ↑/↓ 上下移动"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
                 }
-                .listStyle(.sidebar)
             }
         }
         .sheet(item: $pendingImport) { pending in
