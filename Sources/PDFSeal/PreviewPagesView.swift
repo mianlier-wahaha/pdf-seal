@@ -290,13 +290,29 @@ struct PagePreview: View {
                                     settings.removeFullStamp(inst.id)
                                 }
                             }
-                        // 选中章：四角缩放手柄
-                        if inst.id == settings.selectedFullStampID {
-                            cornerHandles(inst: inst, w: w, h: h, displayH: displayH)
-                        }
                     }
                 }
             }
+        }
+        // 选中章的四角控制点：必须等所有章都渲染完再画，统一置于最上层。
+        // 若写在上面的 ForEach 里，它会夹在「选中章」与「更晚添加的章」之间：
+        // Z 序比它低的章会被它遮挡而点不中，只有更晚添加的章能点中。
+        selectedCornerHandles(displayH: displayH)
+    }
+
+    /// 选中章的四角控制点（独立成层，始终位于所有章之上）
+    @ViewBuilder
+    private func selectedCornerHandles(displayH: CGFloat) -> some View {
+        if let sel = settings.fullStamps.first(where: { $0.id == settings.selectedFullStampID }),
+           sel.covers(index, pageCount: settings.pageCount),
+           !sel.removedPages.contains(index) {
+            // 与正文渲染同一套「物理尺寸 → 显示像素」换算
+            let pagePt = index < doc.pageSizes.count
+                ? doc.pageSizes[index] : CGSize(width: 595, height: 842)
+            let cmScale = displayW / max(pagePt.width, 1)
+            let w = CGFloat(sel.widthCm * 28.3465) * cmScale
+            let h = CGFloat(sel.heightCm * 28.3465) * cmScale
+            cornerHandles(inst: sel, w: w, h: h, displayH: displayH)
         }
     }
 
@@ -305,6 +321,9 @@ struct PagePreview: View {
         let cx = inst.anchor.x * displayW
         let cy = inst.anchor.y * displayH
         let signs: [(CGFloat, CGFloat)] = [(-1, -1), (1, -1), (-1, 1), (1, 1)]
+        // 定位必须用 offset，不能用 position：position 会把视图的布局 frame 撑满整个父容器，
+        // hit area 随之扩大到接近整页，会吞掉其他章的 hover（小手）与点击（选中）。
+        // 本 ZStack 为 topLeading 对齐，故 offset = 目标中心 − 尺寸/2。
         return ForEach(0..<4, id: \.self) { ci in
             Group {
                 if ci == 3 {
@@ -313,8 +332,9 @@ struct PagePreview: View {
                         .fill(Color.accentColor)
                         .overlay { Circle().strokeBorder(Color.white, lineWidth: 1.5) }
                         .frame(width: 14, height: 14)
-                        .position(x: cx + signs[ci].0 * w / 2, y: cy + signs[ci].1 * h / 2)
                         .contentShape(Circle().inset(by: -8))
+                        .offset(x: cx + signs[ci].0 * w / 2 - 7,
+                                y: cy + signs[ci].1 * h / 2 - 7)
                         .highPriorityGesture(resizeGesture(inst: inst, corner: ci,
                                                            cx: cx, cy: cy, w: w, h: h,
                                                            displayH: displayH))
@@ -327,7 +347,8 @@ struct PagePreview: View {
                         .fill(Color.accentColor.opacity(0.7))
                         .overlay { Circle().strokeBorder(Color.white, lineWidth: 1.5) }
                         .frame(width: 12, height: 12)
-                        .position(x: cx + signs[ci].0 * w / 2, y: cy + signs[ci].1 * h / 2)
+                        .offset(x: cx + signs[ci].0 * w / 2 - 6,
+                                y: cy + signs[ci].1 * h / 2 - 6)
                         .allowsHitTesting(false)
                 }
             }
