@@ -230,7 +230,7 @@ struct ContentView: View {
         let panel = NSSavePanel()
         let stem = doc.url!.deletingPathExtension().lastPathComponent
         panel.directoryURL = doc.url!.deletingLastPathComponent()   // 默认原文件所在文件夹
-        panel.nameFieldStringValue = "\(stem)-\(L("文件名后缀")).pdf"
+        panel.nameFieldStringValue = "\(stem)-\(L10n.stampedSuffix).pdf"
         panel.allowedContentTypes = [.pdf]
         panel.beginSheetModal(for: NSApp.mainWindow!) { resp in
             guard resp == .OK, let target = panel.url else { return }

@@ -26,6 +26,17 @@ enum L10n {
         }
     }
 
+    /// 另存为时追加到文件名末尾的标记，按界面语言取值。
+    /// 注意：不能放进词典用 L() 取——简体分支直接返回 key，会把「文件名后缀」这类描述文字写进文件名。
+    /// 取值原则：简短、无空格、语义通用（同时涵盖骑缝章与正文章，故不用「骑缝」）。
+    static var stampedSuffix: String {
+        switch langCode {
+        case "en": return "stamped"
+        case "zh-Hant": return "已蓋章"
+        default: return "已盖章"
+        }
+    }
+
     static let en: [String: String] = [
         "PDF 骑缝章": "PDF Seal",
         "打开": "Open",
@@ -47,7 +58,6 @@ enum L10n {
         "请先打开 PDF": "Open a PDF first",
         "请先添加印章再保存": "Add a stamp before saving",
         "请先添加印章再导出": "Add a stamp before exporting",
-        "文件名后缀": "seam-stamped",
         "骑缝章": "Seam Stamps",
         "缝位": "Edge",
         "右缝": "Right",

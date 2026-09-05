@@ -14,3 +14,5 @@ xcuserdata/
 .github-key
 .github-key.pub
 archive/
+.workbuddy/
+promo/out/
