@@ -295,10 +295,13 @@ private struct LibraryWidthDivider: View {
         .contentShape(Rectangle())
         .onHover { inside in
             hovering = inside
+            // 光标用 set() 直接替换而非 push()/pop()：宽度拖动导致视图重建时 onHover
+            // 可能重复触发，push 会多次入栈、pop 少次，光标栈残留 resizeLeftRight，
+            // 使全窗口（无自带光标跟踪的区域）都显示左右箭头。set() 无配对问题。
             if inside {
-                NSCursor.resizeLeftRight.push()
-            } else if !dragging {
-                NSCursor.pop()
+                NSCursor.resizeLeftRight.set()
+            } else {
+                NSCursor.arrow.set()
             }
         }
         .gesture(
@@ -312,7 +315,7 @@ private struct LibraryWidthDivider: View {
                 }
                 .onEnded { _ in
                     dragging = false
-                    if !hovering { NSCursor.pop() }   // 拖拽中光标可能已离开，补齐 push/pop 配对
+                    if !hovering { NSCursor.arrow.set() }   // 松手时已不在边界上则恢复箭头
                 }
         )
         .accessibilityLabel("调整印章库宽度")
