@@ -97,7 +97,6 @@ struct ParamsPanelView: View {
                                 } label: {
                                     Label(L("移除"), systemImage: "trash")
                                 }
-                                .buttonStyle(.borderless)
                                 .help(L("移除这枚章（Delete 键）"))
                             }
                             HStack {
