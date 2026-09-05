@@ -16,12 +16,14 @@ struct ContentView: View {
     @State private var keyMonitor: Any?
     @State private var flagsMonitor: Any?
     @State private var showCloseConfirm = false
+    /// 印章库面板宽度（拖右侧边界调整，跨启动记忆）
+    @AppStorage("libraryWidth") private var libraryWidth: Double = 220
 
     var body: some View {
         HStack(spacing: 0) {
             SealLibraryView()
-                .frame(width: 220)
-            Divider()
+                .frame(width: libraryWidth)
+            LibraryWidthDivider(width: $libraryWidth)
             VStack(spacing: 0) {
                 previewArea
             }
@@ -268,5 +270,51 @@ struct ContentView: View {
                 errorText = error.localizedDescription
             }
         }
+    }
+}
+
+/// 印章库右侧的可拖拽分隔条：hover 高亮并显示左右箭头光标，
+/// 拖动调整印章库宽度（150–420pt），宽度经 @AppStorage 跨启动记忆。
+/// 视觉上是 1pt 线，可点击/拖拽命中区扩到 9pt 宽。
+private struct LibraryWidthDivider: View {
+    @Binding var width: Double
+    @State private var hovering = false
+    @State private var dragging = false
+    @State private var startWidth: Double = 0
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(hovering || dragging
+                      ? Color.accentColor.opacity(0.7)
+                      : Color(nsColor: .separatorColor))
+                .frame(width: 1)
+        }
+        .frame(width: 9)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            hovering = inside
+            if inside {
+                NSCursor.resizeLeftRight.push()
+            } else if !dragging {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { d in
+                    if !dragging {
+                        dragging = true
+                        startWidth = width   // 记手势起点宽度，避免 translation 累积漂移
+                    }
+                    width = min(max(startWidth + Double(d.translation.width), 150), 420)
+                }
+                .onEnded { _ in
+                    dragging = false
+                    if !hovering { NSCursor.pop() }   // 拖拽中光标可能已离开，补齐 push/pop 配对
+                }
+        )
+        .accessibilityLabel("调整印章库宽度")
     }
 }
