@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var statusText: String?
     @State private var errorText: String?
     @State private var keyMonitor: Any?
+    @State private var flagsMonitor: Any?
     @State private var showCloseConfirm = false
 
     var body: some View {
@@ -57,6 +58,10 @@ struct ContentView: View {
                 NSEvent.removeMonitor(m)
                 keyMonitor = nil
             }
+            if let m = flagsMonitor {
+                NSEvent.removeMonitor(m)
+                flagsMonitor = nil
+            }
         }
     }
 
@@ -91,6 +96,12 @@ struct ContentView: View {
                 settings.removeSelectedFullStamps()
                 return nil
             }
+            return event
+        }
+        // ⌘ 键实时状态：flagsChanged 在修饰键变化瞬间同步触发，写入 settings.commandKeyDown，
+        // 供预览中章的点击手势判定「⌘ 点击多选」。不能读 NSEvent.modifierFlags（异步不可靠）。
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            settings.commandKeyDown = event.modifierFlags.contains(.command)
             return event
         }
     }

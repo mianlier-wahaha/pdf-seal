@@ -277,6 +277,10 @@ final class StampSettings: ObservableObject {
     @Published var selectedFullStampIDs: Set<UUID> = []
     /// 主选中（最后点击 / 添加的章），承载尺寸滑杆与缩放手柄的锚点
     private var primaryID: UUID?
+    /// ⌘ 键实时状态（由 ContentView 的 flagsChanged 监听器写入）。
+    /// 不能依赖 NSEvent.modifierFlags 在 .onTapGesture 闭包里读取——该闭包是手势结束后
+    /// 异步派发的，全局修饰键状态往往已重置，导致判定恒为 false。故用实时跟踪值。
+    @Published var commandKeyDown = false
 
     /// 每枚章的撤销栈（交互前快照）
     private var undoStacks: [UUID: [FullStampSnapshot]] = [:]

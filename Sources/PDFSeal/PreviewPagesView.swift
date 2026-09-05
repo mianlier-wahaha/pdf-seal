@@ -468,7 +468,9 @@ private struct FullStampDraggableView: View {
             .onTapGesture {
                 // 点击章本身 = 选中它（拖动优先，纯点击才触发）。
                 // 按住 ⌘ 点击：在已有选择上累加 / 取消（多选），其余选中状态保留。
-                if NSEvent.modifierFlags.contains(.command) {
+                // 用实时跟踪的 commandKeyDown（由 ContentView 的 flagsChanged 监听器维护），
+                // 不可读 NSEvent.modifierFlags——该闭包异步派发时修饰键状态常已重置。
+                if settings.commandKeyDown {
                     settings.toggleSelection(instanceID)
                 } else {
                     settings.selectOnly(instanceID)
