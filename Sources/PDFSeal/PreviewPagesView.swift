@@ -163,13 +163,13 @@ struct PagePreview: View {
         .frame(width: displayW, height: displayH)
         .coordinateSpace(name: "page-\(index)")
         .onTapGesture { location in
-            // 正文章模式：点击空白处 = 在该位置新增一枚章（仅盖此页，不自动选中/不显示控制框）；
-            // 再点击该章才选中显示控制框
+            // 正文章模式：点击空白处 = 在该位置新增一枚章（仅盖此页）。
+            // 新增后该章自动进入选中态（高亮框 + 四角控制点 + 右栏大小滑杆）；
+            // 再新增下一枚时选中自动转移，按 Esc 取消选中
             guard settings.pageCount > 0 else { return }
             let pt = CGPoint(x: min(max(location.x / displayW, 0.02), 0.98),
                              y: min(max(location.y / displayH, 0.02), 0.98))
             settings.addFullStamp(sealID: seals.selectedID, pageIndex: index, anchor: pt)
-            settings.selectedFullStampID = nil
         }
         .onHover { hovering in
             guard settings.pageCount > 0 else { return }
@@ -310,9 +310,9 @@ struct PagePreview: View {
                 if ci == 3 {
                     // 仅右下角控制点可缩放：高优先级手势，光标为斜向箭头
                     Circle()
-                        .fill(Color.orange)
+                        .fill(Color.accentColor)
                         .overlay { Circle().strokeBorder(Color.white, lineWidth: 1.5) }
-                        .frame(width: 12, height: 12)
+                        .frame(width: 14, height: 14)
                         .position(x: cx + signs[ci].0 * w / 2, y: cy + signs[ci].1 * h / 2)
                         .contentShape(Circle().inset(by: -8))
                         .highPriorityGesture(resizeGesture(inst: inst, corner: ci,
@@ -324,9 +324,9 @@ struct PagePreview: View {
                 } else {
                     // 其余三个角点仅装饰：不拦截事件，拖动穿透到章体（移动）
                     Circle()
-                        .fill(Color.orange.opacity(0.55))
+                        .fill(Color.accentColor.opacity(0.7))
                         .overlay { Circle().strokeBorder(Color.white, lineWidth: 1.5) }
-                        .frame(width: 10, height: 10)
+                        .frame(width: 12, height: 12)
                         .position(x: cx + signs[ci].0 * w / 2, y: cy + signs[ci].1 * h / 2)
                         .allowsHitTesting(false)
                 }
@@ -394,17 +394,34 @@ private struct FullStampDraggableView: View {
             .resizable()
             .frame(width: w, height: h)
             .overlay {
-                // 仅选中的章显示虚线框
+                // 选中态：白色衬底 + accentColor 虚线双层描边，
+                // 保证在白纸 / 红章 / 深色背景上都清晰可辨
                 if isSelected {
-                    Rectangle().strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                        .foregroundStyle(Color.orange.opacity(0.9))
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 3)
+                            .inset(by: -3.5)
+                            .strokeBorder(.white.opacity(0.6), lineWidth: 4)
+                        RoundedRectangle(cornerRadius: 3)
+                            .inset(by: -3.5)
+                            .strokeBorder(Color.accentColor,
+                                          style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                    }
+                    .allowsHitTesting(false)
                 }
             }
             .background {
-                // 稍大的隐形热区，方便抓取
-                Color.clear
-                    .frame(width: w + 24, height: h + 24)
-                    .contentShape(Rectangle())
+                ZStack {
+                    // 选中态淡底色
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color.accentColor.opacity(0.12))
+                            .frame(width: w, height: h)
+                    }
+                    // 稍大的隐形热区，方便抓取
+                    Color.clear
+                        .frame(width: w + 24, height: h + 24)
+                        .contentShape(Rectangle())
+                }
             }
             .rotationEffect(.degrees(rotation))
             .opacity(opacity)
@@ -424,6 +441,10 @@ private struct FullStampDraggableView: View {
                     }
                     .onEnded { _ in dragStart = nil }
             )
+            .onTapGesture {
+                // 点击章本身 = 选中它（拖动优先，纯点击才触发）
+                settings.selectedFullStampID = instanceID
+            }
             .onHover { hovering in
                 if hovering {
                     NSCursor.openHand.push()
