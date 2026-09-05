@@ -6,6 +6,7 @@ struct SealLibraryView: View {
     @EnvironmentObject private var settings: StampSettings
     @EnvironmentObject private var doc: DocumentStore
     @State private var pendingImport: PendingImport?
+    @State private var draggingItem: SealItem?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,10 +45,20 @@ struct SealLibraryView: View {
                                 .contextMenu {
                                     Button(L("删除"), role: .destructive) { seals.delete(item) }
                                 }
+                                // 拖拽重排：AppKit 级 onDrag/onDrop 实时换位（sidebar List 的 .onMove 在
+                                // macOS 上经常不触发拖拽，故不用）。拖起时章图跟随光标，dropEntered 换位。
+                                .onDrag {
+                                    draggingItem = item
+                                    return NSItemProvider(object: item.id.uuidString as NSString)
+                                }
+                                .onDrop(of: [.text], delegate:
+                                    SealRowDropDelegate(item: item, dragging: $draggingItem, store: seals))
                         }
-                        .onMove { seals.moveSeals(fromOffsets: $0, toOffset: $1) }
                     }
                     .listStyle(.sidebar)
+                    // 兜底：拖到行与行之间的空隙/列表空白处松手也能结束并落盘
+                    .onDrop(of: [.text], delegate:
+                        SealListDropDelegate(dragging: $draggingItem, store: seals))
                     Text(L("拖拽可排序；选中后按 ↑/↓ 上下移动"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -118,5 +129,43 @@ private struct SealRow: View {
 
     private var nameBinding: Binding<String> {
         Binding(get: { item.name }, set: { seals.rename(item, to: $0) })
+    }
+}
+
+/// 行级落点：拖到某行上时把被拖章实时移动到该行位置
+private struct SealRowDropDelegate: DropDelegate {
+    let item: SealItem
+    @Binding var dragging: SealItem?
+    let store: SealStore
+
+    func dropEntered(info: DropInfo) {
+        guard let dragged = dragging, dragged.id != item.id else { return }
+        store.moveSeal(dragged, to: item)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        if dragging != nil { store.persistOrder() }
+        dragging = nil
+        return true
+    }
+}
+
+/// 列表级兜底落点：松手在行间空隙/空白处也能结束拖拽并落盘
+private struct SealListDropDelegate: DropDelegate {
+    @Binding var dragging: SealItem?
+    let store: SealStore
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        if dragging != nil { store.persistOrder() }
+        dragging = nil
+        return true
     }
 }

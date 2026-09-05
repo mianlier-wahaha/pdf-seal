@@ -157,9 +157,17 @@ final class SealStore: ObservableObject {
 
     // MARK: 印章库排序
 
-    /// 拖拽重排印章库顺序（列表内拖拽 / ⌘ 拖拽）
-    func moveSeals(fromOffsets indices: IndexSet, toOffset: Int) {
-        seals.move(fromOffsets: indices, toOffset: toOffset)
+    /// 拖拽落位：把 dragged 移动到 target 当前位置（拖拽过程中实时调用，不落盘）
+    func moveSeal(_ dragged: SealItem, to target: SealItem) {
+        guard let from = seals.firstIndex(where: { $0.id == dragged.id }),
+              let to = seals.firstIndex(where: { $0.id == target.id }),
+              from != to else { return }
+        seals.move(fromOffsets: IndexSet(integer: from),
+                   toOffset: to > from ? to + 1 : to)
+    }
+
+    /// 拖拽结束后持久化顺序
+    func persistOrder() {
         persist()
     }
 
