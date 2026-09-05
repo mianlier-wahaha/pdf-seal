@@ -282,8 +282,13 @@ final class StampSettings: ObservableObject {
     /// 异步派发的，全局修饰键状态往往已重置，导致判定恒为 false。故用实时跟踪值。
     @Published var commandKeyDown = false
 
-    /// 每枚章的撤销栈（交互前快照）
-    private var undoStacks: [UUID: [FullStampSnapshot]] = [:]
+    // MARK: - 撤销：统一时间线
+    /// 撤销动作（按发生时间排序）。⌘Z 弹栈顶：添加则移除该章，几何则还原快照。
+    private enum UndoAction {
+        case add(UUID)                           // 撤销「添加」= 移除该章
+        case geometry(UUID, FullStampSnapshot)   // 撤销「几何改动」= 还原快照
+    }
+    private var undoActions: [UndoAction] = []
 
     private(set) var pageCount = 0
 
@@ -294,7 +299,7 @@ final class StampSettings: ObservableObject {
         fullStamps = []
         selectedFullStampIDs = []
         primaryID = nil
-        undoStacks = [:]
+        undoActions = []
     }
 
     func syncPageCount(_ count: Int) {
@@ -308,32 +313,42 @@ final class StampSettings: ObservableObject {
         fullStamps = []
         selectedFullStampIDs = []
         primaryID = nil
-        undoStacks = [:]
+        undoActions = []
     }
 
-    /// 交互（拖动/缩放/点击落位）开始前记录快照
+    /// 交互（拖动/缩放/点击落位/尺寸滑杆）开始前记录「改动前」快照，入统一时间线
     func pushUndo(_ id: UUID) {
         guard let inst = fullStamps.first(where: { $0.id == id }) else { return }
-        var stack = undoStacks[id] ?? []
-        stack.append(FullStampSnapshot(anchor: inst.anchor, widthCm: inst.widthCm,
-                                       heightCm: inst.heightCm, rotation: inst.rotation,
-                                       opacity: inst.opacity))
-        if stack.count > 50 { stack.removeFirst() }
-        undoStacks[id] = stack
+        let snap = FullStampSnapshot(anchor: inst.anchor, widthCm: inst.widthCm,
+                                     heightCm: inst.heightCm, rotation: inst.rotation,
+                                     opacity: inst.opacity)
+        undoActions.append(.geometry(id, snap))
+        if undoActions.count > 200 { undoActions.removeFirst() }
     }
 
-    /// ⌘Z / Ctrl+Z：回退到上一个快照
+    /// ⌘Z / Ctrl+Z：撤销时间线上「最近一次」操作（添加章 或 几何改动）。
+    /// 栈顶动作指向的章已不存在（被其它途径删除）时，跳过并继续弹栈，直到命中有效动作。
     @discardableResult
-    func undo(_ id: UUID) -> Bool {
-        guard var stack = undoStacks[id], let snap = stack.popLast(),
-              let i = fullStamps.firstIndex(where: { $0.id == id }) else { return false }
-        undoStacks[id] = stack
-        fullStamps[i].anchor = snap.anchor
-        fullStamps[i].widthCm = snap.widthCm
-        fullStamps[i].heightCm = snap.heightCm
-        fullStamps[i].rotation = snap.rotation
-        fullStamps[i].opacity = snap.opacity
-        return true
+    func undo() -> Bool {
+        while let action = undoActions.popLast() {
+            switch action {
+            case .add(let id):
+                guard fullStamps.contains(where: { $0.id == id }) else { continue }
+                fullStamps.removeAll { $0.id == id }
+                selectedFullStampIDs.remove(id)
+                if primaryID == id { primaryID = remainingPrimary() }
+                return true
+            case .geometry(let id, let snap):
+                guard let i = fullStamps.firstIndex(where: { $0.id == id }) else { continue }
+                fullStamps[i].anchor = snap.anchor
+                fullStamps[i].widthCm = snap.widthCm
+                fullStamps[i].heightCm = snap.heightCm
+                fullStamps[i].rotation = snap.rotation
+                fullStamps[i].opacity = snap.opacity
+                return true
+            }
+        }
+        return false
     }
 
     /// 「添加」按钮：按当前模板选项新增一条骑缝章（锁定印章与位置）
@@ -462,11 +477,16 @@ final class StampSettings: ObservableObject {
         }
         fullStamps.append(inst)
         selectOnly(inst.id)
+        undoActions.append(.add(inst.id))
     }
 
     func removeFullStamp(_ id: UUID) {
         fullStamps.removeAll { $0.id == id }
-        undoStacks[id] = nil
+        undoActions.removeAll {
+            if case .add(let aid) = $0 { return aid == id }
+            if case .geometry(let gid, _) = $0 { return gid == id }
+            return false
+        }
         selectedFullStampIDs.remove(id)
         if primaryID == id {
             primaryID = remainingPrimary()
@@ -477,7 +497,11 @@ final class StampSettings: ObservableObject {
     func removeSelectedFullStamps() {
         for id in selectedFullStampIDs {
             fullStamps.removeAll { $0.id == id }
-            undoStacks[id] = nil
+            undoActions.removeAll {
+                if case .add(let aid) = $0 { return aid == id }
+                if case .geometry(let gid, _) = $0 { return gid == id }
+                return false
+            }
         }
         selectedFullStampIDs = []
         primaryID = nil
@@ -487,7 +511,7 @@ final class StampSettings: ObservableObject {
         fullStamps = []
         selectedFullStampIDs = []
         primaryID = nil
-        undoStacks = [:]
+        undoActions = []
     }
 
     func anchor(of id: UUID) -> CGPoint? {

@@ -82,7 +82,7 @@ struct ContentView: View {
             }
             if event.keyCode == 6, event.characters?.lowercased() == "z",
                event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
-                if let id = settings.selectedFullStampID, settings.undo(id) {
+                if settings.undo() {
                     return nil
                 }
             }
