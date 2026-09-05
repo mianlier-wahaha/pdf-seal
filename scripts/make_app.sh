@@ -74,3 +74,6 @@ cd ..
 
 echo "完成: $APP"
 echo "release 产物: release/$APP_NAME.app | release/$APP_NAME.zip | release/$APP_NAME.dmg"
+
+# 打包完自动打开（用户约定：免手动到路径下打开）
+open "release/$APP_NAME.app"
