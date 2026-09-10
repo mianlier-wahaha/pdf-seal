@@ -30,35 +30,51 @@ struct SealLibraryView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                VStack(spacing: 0) {
-                    List {
-                        ForEach(seals.seals) { item in
-                            SealRow(item: item)
-                                .listRowBackground(item.id == seals.selectedID ? Color.accentColor.opacity(0.15) : .clear)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    seals.selectedID = item.id
-                                    let d = seals.physicalSize(for: item.id)
-                                    settings.applySealPhysicalSize(widthCm: d.widthCm, heightCm: d.heightCm,
-                                                                   pageHeightPt: doc.pageSizes.first?.height)
+                VStack(spacing: 8) {
+                    // 与右侧 Form .grouped 同款视觉：浅窗口底上的圆角卡片（controlBackgroundColor
+                    // 底 + 细描边 + 轻阴影 = 浮起感）。不用 List：sidebar/inset 样式要么深灰扁平、
+                    // 要么无卡片感，均与右栏不统一。
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(seals.seals) { item in
+                                SealRow(item: item)
+                                    .background(item.id == seals.selectedID
+                                                ? Color.accentColor.opacity(0.15)
+                                                : Color.clear)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        seals.selectedID = item.id
+                                        let d = seals.physicalSize(for: item.id)
+                                        settings.applySealPhysicalSize(widthCm: d.widthCm, heightCm: d.heightCm,
+                                                                       pageHeightPt: doc.pageSizes.first?.height)
+                                    }
+                                    .contextMenu {
+                                        Button(L("删除"), role: .destructive) { seals.delete(item) }
+                                    }
+                                    // 拖拽重排：onDrag/onDrop 实时换位。拖起时章图跟随光标，dropEntered 换位。
+                                    .onDrag {
+                                        draggingItem = item
+                                        return NSItemProvider(object: item.id.uuidString as NSString)
+                                    }
+                                    .onDrop(of: [.text], delegate:
+                                        SealRowDropDelegate(item: item, dragging: $draggingItem, store: seals))
+                                if item.id != seals.seals.last?.id {
+                                    Divider().padding(.horizontal, 10)
                                 }
-                                .contextMenu {
-                                    Button(L("删除"), role: .destructive) { seals.delete(item) }
-                                }
-                                // 拖拽重排：AppKit 级 onDrag/onDrop 实时换位（sidebar List 的 .onMove 在
-                                // macOS 上经常不触发拖拽，故不用）。拖起时章图跟随光标，dropEntered 换位。
-                                .onDrag {
-                                    draggingItem = item
-                                    return NSItemProvider(object: item.id.uuidString as NSString)
-                                }
-                                .onDrop(of: [.text], delegate:
-                                    SealRowDropDelegate(item: item, dragging: $draggingItem, store: seals))
+                            }
                         }
                     }
-                    .listStyle(.sidebar)
-                    // 兜底：拖到行与行之间的空隙/列表空白处松手也能结束并落盘
+                    // 兜底：拖到行与行之间的空隙/卡片空白处松手也能结束并落盘
                     .onDrop(of: [.text], delegate:
                         SealListDropDelegate(dragging: $draggingItem, store: seals))
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.06), radius: 2, y: 1)
+                    .padding(.horizontal, 10)
                     Text(L("拖拽可排序；选中后按 ↑/↓ 上下移动"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
