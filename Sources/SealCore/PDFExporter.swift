@@ -29,9 +29,12 @@ public enum PDFExporter {
     }
 
     /// 多章版本：placement.sealKey 对应 seals 字典的键
+    /// watermark：可选文本水印层，绘制在原页之上、章之下；watermarkPages 为 0-based 闭区间页码（nil = 全部页）
     public static func export(input: URL, output: URL,
                               placements: [StampPlacement],
-                              seals: [Int: CGImage]) throws {
+                              seals: [Int: CGImage],
+                              watermark: WatermarkConfig? = nil,
+                              watermarkPages: ClosedRange<Int>? = nil) throws {
         guard let doc = CGPDFDocument(input as CFURL) else { throw SealError.cannotOpenInput }
         let pageCount = doc.numberOfPages
 
@@ -97,6 +100,11 @@ public enum PDFExporter {
                 }
                 if let page = doc.page(at: m.index + 1) {
                     ctx.drawPDFPage(page)
+                }
+                // 水印层：与页面同一显示空间（已含 /Rotate 变换），垫在章之下
+                if let wm = watermark,
+                   watermarkPages?.contains(m.index) ?? true {
+                    WatermarkRenderer.draw(wm, in: ctx, pageSize: m.size)
                 }
                 ctx.restoreGState()
 

@@ -128,6 +128,99 @@ struct ParamsPanelView: View {
                         }
                     }
                 }
+                Section(L("水印")) {
+                    Toggle(L("启用水印"), isOn: $settings.watermark.enabled)
+                    if settings.watermark.enabled {
+                        TextField(L("水印文本"), text: $settings.watermark.text)
+                            .textFieldStyle(.roundedBorder)
+                        Picker(L("字体"), selection: $settings.watermark.fontFamily) {
+                            ForEach(watermarkFonts, id: \.1) { f in
+                                Text(L(f.0)).tag(f.1)
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            Text(L("字号")).font(.callout)
+                            OffsetSlider(value: settings.watermark.fontSize,
+                                         range: 8...96) { v in
+                                settings.watermark.fontSize = v.rounded()
+                            }
+                            Text("\(Int(settings.watermark.fontSize))")
+                                .font(.caption).monospacedDigit()
+                                .frame(width: 26)
+                        }
+                        HStack(spacing: 8) {
+                            Text(L("颜色")).font(.callout)
+                            ForEach(0..<watermarkColors.count, id: \.self) { i in
+                                let c = watermarkColors[i]
+                                Circle()
+                                    .fill(Color(red: c.0, green: c.1, blue: c.2))
+                                    .frame(width: 16, height: 16)
+                                    .overlay {
+                                        Circle().strokeBorder(.primary.opacity(settings.watermark.colorIndex == i ? 0.8 : 0.15),
+                                                              lineWidth: settings.watermark.colorIndex == i ? 2 : 1)
+                                    }
+                                    .contentShape(Circle())
+                                    .onTapGesture { settings.watermark.colorIndex = i }
+                            }
+                            Spacer()
+                        }
+                        Picker(L("旋转"), selection: $settings.watermark.rotation) {
+                            ForEach([0.0, 30.0, 45.0, 60.0, 90.0], id: \.self) { deg in
+                                Text("\(Int(deg))°").tag(deg)
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            Text(L("透明度")).font(.callout)
+                            OffsetSlider(value: settings.watermark.opacityPercent,
+                                         range: 1...50) { v in
+                                settings.watermark.opacityPercent = v.rounded()
+                            }
+                            Text("\(Int(settings.watermark.opacityPercent))%")
+                                .font(.caption).monospacedDigit()
+                                .frame(width: 34)
+                        }
+                        Picker(L("多行水印"), selection: $settings.watermark.mode) {
+                            Text(L("单行")).tag(WatermarkConfig.Mode.single)
+                            Text(L("一页两行")).tag(WatermarkConfig.Mode.twoRows)
+                            Text(L("平铺")).tag(WatermarkConfig.Mode.tiled)
+                        }
+                        Picker(L("水平位置"), selection: $settings.watermark.hAlign) {
+                            ForEach(WatermarkConfig.Align.allCases, id: \.self) { a in
+                                Text(L(a.label(horizontal: true))).tag(a)
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            Text(L("水平偏移")).font(.callout)
+                            OffsetSlider(value: settings.watermark.offsetXmm,
+                                         range: -100...100) { v in
+                                settings.watermark.offsetXmm = v.rounded()
+                            }
+                            Text(LF("%d mm", Int(settings.watermark.offsetXmm)))
+                                .font(.caption).monospacedDigit()
+                                .frame(width: 44)
+                        }
+                        Picker(L("垂直位置"), selection: $settings.watermark.vAlign) {
+                            ForEach(WatermarkConfig.Align.allCases, id: \.self) { a in
+                                Text(L(a.label(horizontal: false))).tag(a)
+                            }
+                        }
+                        HStack(spacing: 8) {
+                            Text(L("垂直偏移")).font(.callout)
+                            OffsetSlider(value: settings.watermark.offsetYmm,
+                                         range: -100...100) { v in
+                                settings.watermark.offsetYmm = v.rounded()
+                            }
+                            Text(LF("%d mm", Int(settings.watermark.offsetYmm)))
+                                .font(.caption).monospacedDigit()
+                                .frame(width: 44)
+                        }
+                        rangeControls(all: $settings.watermark.allPages,
+                                      start: $settings.watermark.rangeStart,
+                                      end: $settings.watermark.rangeEnd)
+                        Text(L("水印垫在章的下层；预览即导出效果"))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             .formStyle(.grouped)
         }

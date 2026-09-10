@@ -274,6 +274,80 @@ struct QifengInstance: Identifiable, Equatable {
 }
 
 @MainActor
+// MARK: - 水印设置（文档级绘制层，与章的逐对象模型独立）
+
+extension WatermarkConfig.Align {
+    /// 对齐预设的本地化标签（水平：居左/居中/居右；垂直：居上/居中/居下）
+    func label(horizontal: Bool) -> String {
+        switch (horizontal, self) {
+        case (true, .start): return "居左"
+        case (true, .center): return "居中"
+        case (true, .end): return "居右"
+        case (false, .start): return "居上"
+        case (false, .center): return "居中"
+        case (false, .end): return "居下"
+        }
+    }
+}
+
+/// 水印可用的颜色预设（下标即 colorIndex）
+let watermarkColors: [(Double, Double, Double)] = [
+    (0.55, 0.55, 0.55),   // 灰
+    (0.10, 0.10, 0.10),   // 黑
+    (0.80, 0.15, 0.15),   // 红
+    (0.15, 0.30, 0.70),   // 蓝
+]
+
+/// 水印字体预设：UI 标签 → 字体家族名（绘制时解析为 PostScript 名）
+let watermarkFonts: [(String, String)] = [
+    ("宋体-简", "Songti SC"),
+    ("黑体", "PingFang SC"),
+    ("楷体-简", "Kaiti SC"),
+    ("仿宋", "STFangsong"),
+]
+
+struct WatermarkSettings: Equatable {
+    var enabled = false
+    var text = ""
+    var fontFamily = "Songti SC"          // watermarkFonts 里的家族名
+    var fontSize: Double = 48             // pt
+    var colorIndex = 0                    // watermarkColors 下标
+    var rotation: Double = 45             // 度
+    var opacityPercent: Double = 8        // 1...100
+    var mode: WatermarkConfig.Mode = .single
+    var hAlign: WatermarkConfig.Align = .center
+    var vAlign: WatermarkConfig.Align = .center
+    var offsetXmm: Double = 0
+    var offsetYmm: Double = 0
+    var allPages = true
+    var rangeStart = 1
+    var rangeEnd = 1
+
+    /// 是否处于可导出状态（开着且有非空文本）
+    var isActive: Bool {
+        enabled && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 转为绘制配置；未启用或文本为空返回 nil。
+    /// 字体家族名解析为 PostScript 名（解析失败回退苹方）。
+    func config() -> WatermarkConfig? {
+        guard isActive else { return nil }
+        let psName = NSFontManager.shared.availableMembers(ofFontFamily: fontFamily)?.first?.first as? String
+            ?? "PingFangSC-Regular"
+        let idx = min(max(colorIndex, 0), watermarkColors.count - 1)
+        let (r, g, b) = watermarkColors[idx]
+        return WatermarkConfig(text: text,
+                               fontPS: psName,
+                               fontSize: CGFloat(fontSize),
+                               red: r, green: g, blue: b,
+                               rotation: CGFloat(rotation),
+                               opacity: opacityPercent / 100,
+                               mode: mode,
+                               hAlign: hAlign, vAlign: vAlign,
+                               offsetXmm: offsetXmm, offsetYmm: offsetYmm)
+    }
+}
+
 final class StampSettings: ObservableObject {
     @Published var edge: SeamEdge = .right
     @Published var allPages = true
@@ -297,6 +371,8 @@ final class StampSettings: ObservableObject {
     @Published var fullAllPages = false
     @Published var fullRangeStart = 1
     @Published var fullRangeEnd = 1
+    // 水印（文档级设置，换文档时保留模板参数、仅重置页码范围）
+    @Published var watermark = WatermarkSettings()
     // 已添加的正文章实例（可多枚）
     @Published var fullStamps: [FullStampInstance] = []
     /// 多选：当前所有被选中章的 id 集合（唯一真相来源）
@@ -335,6 +411,8 @@ final class StampSettings: ObservableObject {
         rangeEnd = count
         fullRangeStart = count
         fullRangeEnd = count
+        watermark.rangeStart = 1
+        watermark.rangeEnd = count
         qifengStamps = []
         fullStamps = []
         selectedFullStampIDs = []

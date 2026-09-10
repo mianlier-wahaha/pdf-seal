@@ -179,15 +179,45 @@ struct PagePreview: View {
                 NSCursor.pop()
             }
         }
-        .task(id: "\(doc.url?.absoluteString ?? "")|\(Int(displayW))") {
+        .task(id: "\(doc.url?.absoluteString ?? "")|\(Int(displayW))|\(wmFingerprint)|\(index)") {
             thumb = renderThumb(aspect: size.height / max(size.width, 1))
         }
+    }
+
+    /// 水印状态指纹：任何水印参数变化都会触发缩略图重渲染（所见即所得）
+    private var wmFingerprint: String {
+        settings.watermark.isActive ? String(describing: settings.watermark) : "off"
     }
 
     private func renderThumb(aspect: CGFloat) -> NSImage? {
         guard let page = doc.document?.page(at: index) else { return nil }
         let w = displayW * 2
-        return page.thumbnail(of: CGSize(width: w, height: w * aspect), for: .mediaBox)
+        let base = page.thumbnail(of: CGSize(width: w, height: w * aspect), for: .mediaBox)
+        // 水印合成：与导出共用 WatermarkRenderer，所见即所得。
+        // 页码范围过滤（1-based UI → 页索引）
+        guard let wm = settings.watermark.config(),
+              settings.watermark.allPages || (index + 1 >= min(settings.watermark.rangeStart, settings.watermark.rangeEnd)
+                                              && index + 1 <= max(settings.watermark.rangeStart, settings.watermark.rangeEnd)),
+              let tiff = base.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let src = rep.cgImage
+        else { return base }
+        let pw = src.width, ph = src.height
+        guard let ctx = CGContext(data: nil, width: pw, height: ph,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return base }
+        ctx.draw(src, in: CGRect(x: 0, y: 0, width: pw, height: ph))
+        // 位图像素坐标 → 页面 pt 坐标（水印配置全部以 pt 计）
+        let pageSize = index < doc.pageSizes.count ? doc.pageSizes[index] : CGSize(width: 595, height: 842)
+        let scale = CGFloat(pw) / max(pageSize.width, 1)
+        ctx.saveGState()
+        ctx.scaleBy(x: scale, y: scale)
+        WatermarkRenderer.draw(wm, in: ctx, pageSize: pageSize)
+        ctx.restoreGState()
+        guard let out = ctx.makeImage() else { return base }
+        return NSImage(cgImage: out, size: NSSize(width: CGFloat(pw) / 2, height: CGFloat(ph) / 2))
     }
 
     /// 渲染本页上的所有骑缝章条（每条实例独立，可按页删除/恢复）

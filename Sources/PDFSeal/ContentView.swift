@@ -141,15 +141,28 @@ struct ContentView: View {
         }
     }
 
+    /// 水印导出参数：config 为 nil 表示未启用水印；页码范围为 0-based 闭区间（nil = 全部页）
+    private var watermarkParams: (config: WatermarkConfig, pages: ClosedRange<Int>?)? {
+        guard let wm = settings.watermark.config() else { return nil }
+        if settings.watermark.allPages { return (wm, nil) }
+        let total = max(doc.pageCount, 1)
+        let s = min(max(settings.watermark.rangeStart, 1), total) - 1
+        let e = min(max(settings.watermark.rangeEnd, 1), total) - 1
+        return (wm, min(s, e)...max(s, e))
+    }
+
     /// 保存：用盖章结果覆盖当前文件
     private func saveInPlace() {
         guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
-        guard let base = try? buildPlacements() else {
-            errorText = L("请先添加印章再保存"); return
+        let base = try? buildPlacements()
+        let wmParams = watermarkParams
+        guard base != nil || wmParams != nil else {
+            errorText = L("请先添加印章或启用水印再保存"); return
         }
         do {
             try PDFExporter.export(input: doc.url!, output: doc.url!,
-                                   placements: base.placements, seals: base.seals)
+                                   placements: base?.placements ?? [], seals: base?.seals ?? [:],
+                                   watermark: wmParams?.config, watermarkPages: wmParams?.pages)
             statusText = LF("已保存：%@", doc.displayName)
         } catch {
             errorText = error.localizedDescription
@@ -180,9 +193,9 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     Button { pickPDF() } label: { Label(L("打开"), systemImage: "doc") }
                     Button { saveInPlace() } label: { Label(L("保存"), systemImage: "arrow.down.doc") }
-                        .disabled(doc.document == nil || seals.selectedID == nil)
+                        .disabled(doc.document == nil || (seals.selectedID == nil && !settings.watermark.isActive))
                     Button { exportPDF() } label: { Label(L("另存为"), systemImage: "square.and.arrow.down") }
-                        .disabled(doc.document == nil || seals.selectedID == nil)
+                        .disabled(doc.document == nil || (seals.selectedID == nil && !settings.watermark.isActive))
                     Button { showCloseConfirm = true } label: { Label(L("关闭"), systemImage: "xmark.circle") }
                         .disabled(doc.document == nil)
                     Spacer()
@@ -254,7 +267,11 @@ struct ContentView: View {
 
     private func exportPDF() {
         guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
-        guard let base = try? buildPlacements() else { errorText = L("请先添加印章再导出"); return }
+        let base = try? buildPlacements()
+        let wmParams = watermarkParams
+        guard base != nil || wmParams != nil else {
+            errorText = L("请先添加印章或启用水印再导出"); return
+        }
         let panel = NSSavePanel()
         let stem = doc.url!.deletingPathExtension().lastPathComponent
         panel.directoryURL = doc.url!.deletingLastPathComponent()   // 默认原文件所在文件夹
@@ -264,7 +281,8 @@ struct ContentView: View {
             guard resp == .OK, let target = panel.url else { return }
             do {
                 try PDFExporter.export(input: doc.url!, output: target,
-                                       placements: base.placements, seals: base.seals)
+                                       placements: base?.placements ?? [], seals: base?.seals ?? [:],
+                                       watermark: wmParams?.config, watermarkPages: wmParams?.pages)
                 statusText = LF("已导出：%@", target.lastPathComponent)
             } catch {
                 errorText = error.localizedDescription
