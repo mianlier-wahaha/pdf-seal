@@ -259,6 +259,10 @@ struct QifengInstance: Identifiable, Equatable {
     let edge: SeamEdge
     var size: Double          // 章高占页高比例
     var offset: Double        // 上下偏移（负=下移，正=上移）
+    var firstPageLarger: Bool // 首页占比加大
+    var firstPageRatio: Double// 首页占总章图比例
+    var middleRatioEnabled: Bool // 是否单独控制内页占比
+    var middleRatio: Double   // 中间页每页占总章图比例
     var allPages: Bool
     var rangeStart: Int
     var rangeEnd: Int
@@ -356,6 +360,10 @@ final class StampSettings: ObservableObject {
     @Published var qifengSize: Double = 0.15
     @Published var qifengOffset: Double = 0
     @Published var qifengOpacity: Double = 0.9
+    @Published var qifengFirstPageLarger: Bool = false
+    @Published var qifengFirstPageRatio: Double = 0.25
+    @Published var qifengMiddleRatioEnabled: Bool = true
+    @Published var qifengMiddleRatio: Double = 0.05
 
     // 骑缝章模板（「添加」时的初始选项）
     // qifengSize / qifengOffset 即模板参数
@@ -463,6 +471,10 @@ final class StampSettings: ObservableObject {
                                            edge: edge,
                                            size: qifengSize,
                                            offset: qifengOffset,
+                                           firstPageLarger: qifengFirstPageLarger,
+                                           firstPageRatio: qifengFirstPageRatio,
+                                           middleRatioEnabled: qifengMiddleRatioEnabled,
+                                           middleRatio: qifengMiddleRatio,
                                            allPages: allPages,
                                            rangeStart: rangeStart,
                                            rangeEnd: rangeEnd))
@@ -652,6 +664,10 @@ final class StampSettings: ObservableObject {
         c.range = allPages ? (0...(max(pageCount - 1, 0))) : qifengRange
         c.sizeRatio = CGFloat(qifengSize)
         c.offset = CGFloat(qifengOffset)
+        c.firstPageLarger = qifengFirstPageLarger
+        c.firstPageRatio = CGFloat(qifengFirstPageRatio)
+        c.middleRatioEnabled = qifengMiddleRatioEnabled
+        c.middleRatio = CGFloat(qifengMiddleRatio)
         return c
     }
 }

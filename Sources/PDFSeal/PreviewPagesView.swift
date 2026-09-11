@@ -28,24 +28,24 @@ struct PreviewPagesView: View {
                     }
                     .padding(.vertical, 16)
                 }
-                .onChange(of: settings.fullStamps.count) { _ in
+                .onChange(of: settings.fullStamps.count) { [self] _ in
                     // 点「添加」新增章后，自动滚到该章页范围的起始页
                     if let inst = settings.selectedInstance, doc.pageCount > 0 {
                         let target = inst.effectiveRange(pageCount: doc.pageCount).lowerBound
                         withAnimation {
                             proxy.scrollTo(target, anchor: .center)
                         }
-                        pageInput = target + 1
+                        $pageInput.wrappedValue = target + 1
                     }
                 }
                 // 触控板双指捏合缩放
                 .gesture(
                     MagnificationGesture()
-                        .onChanged { v in
-                            if pinchBase == nil { pinchBase = zoomPercent }
-                            zoomPercent = min(max((pinchBase! * v), 10), 400)
+                        .onChanged { [self] v in
+                            if $pinchBase.wrappedValue == nil { $pinchBase.wrappedValue = $zoomPercent.wrappedValue }
+                            $zoomPercent.wrappedValue = min(max(($pinchBase.wrappedValue! * v), 10), 400)
                         }
-                        .onEnded { _ in pinchBase = nil }
+                        .onEnded { [self] _ in $pinchBase.wrappedValue = nil }
                 )
                 statusBar(proxy: proxy)
             }
@@ -71,10 +71,10 @@ struct PreviewPagesView: View {
                               format: .number.precision(.fractionLength(0...1)))
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.trailing)
-                        .onSubmit { zoomPercent = min(max(zoomPercent, 10), 400) }
+                        .onSubmit { [self] in $zoomPercent.wrappedValue = min(max($zoomPercent.wrappedValue, 10), 400) }
                     Menu {
                         ForEach(presets, id: \.self) { p in
-                            Button("\(p)%") { zoomPercent = Double(p) }
+                            Button("\(p)%") { [self] in $zoomPercent.wrappedValue = Double(p) }
                         }
                     } label: {
                         Image(systemName: "chevron.down")
@@ -106,7 +106,7 @@ struct PreviewPagesView: View {
                     .multilineTextAlignment(.trailing)
                     .frame(width: 46)
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { jumpTo(proxy: proxy) }
+                    .onSubmit { [self] in jumpTo(proxy: proxy, pageInput: $pageInput) }
                 Text("/ \(doc.pageCount)")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -121,10 +121,10 @@ struct PreviewPagesView: View {
         .overlay(alignment: .top) { Divider() }
     }
 
-    private func jumpTo(proxy: ScrollViewProxy) {
+    private func jumpTo(proxy: ScrollViewProxy, pageInput: Binding<Int>) {
         guard doc.pageCount > 0 else { return }
-        let target = min(max(pageInput, 1), doc.pageCount)
-        pageInput = target
+        let target = min(max(pageInput.wrappedValue, 1), doc.pageCount)
+        pageInput.wrappedValue = target
         withAnimation {
             proxy.scrollTo(target - 1, anchor: .top)
         }
@@ -179,8 +179,8 @@ struct PagePreview: View {
                 NSCursor.pop()
             }
         }
-        .task(id: "\(doc.url?.absoluteString ?? "")|\(Int(displayW))|\(wmFingerprint)|\(index)") {
-            thumb = renderThumb(aspect: size.height / max(size.width, 1))
+        .task(id: "\(doc.url?.absoluteString ?? "")|\(Int(displayW))|\(wmFingerprint)|\(index)") { [self] in
+            $thumb.wrappedValue = renderThumb(aspect: size.height / max(size.width, 1))
         }
     }
 
@@ -227,7 +227,25 @@ struct PagePreview: View {
         c.range = q.effectiveRange(pageCount: pageCount)
         c.sizeRatio = CGFloat(q.size)
         c.offset = CGFloat(q.offset)
+        c.firstPageLarger = q.firstPageLarger
+        c.firstPageRatio = CGFloat(q.firstPageRatio)
+        c.middleRatioEnabled = q.middleRatioEnabled
+        c.middleRatio = CGFloat(q.middleRatio)
         return c
+    }
+
+    /// 骑缝章条朝页心边缘的纸厚渐变 mask（白 = 完全可见，灰 = 按亮度衰减）
+    private static func fadeMaskShape(frac: CGFloat, edgeAlpha: CGFloat, atMaxX: Bool) -> some View {
+        let edge = Color(white: Double(max(0, min(1, edgeAlpha))))
+        let stops: [Gradient.Stop] = atMaxX
+            ? [Gradient.Stop(color: .white, location: 0),
+               Gradient.Stop(color: .white, location: max(0, 1 - frac)),
+               Gradient.Stop(color: edge, location: 1)]
+            : [Gradient.Stop(color: edge, location: 0),
+               Gradient.Stop(color: .white, location: min(1, frac)),
+               Gradient.Stop(color: .white, location: 1)]
+        return Rectangle()
+            .fill(LinearGradient(stops: stops, startPoint: .leading, endPoint: .trailing))
     }
 
     private func qifengOverlays(displayH: CGFloat) -> some View {
@@ -263,6 +281,7 @@ struct PagePreview: View {
                                 .resizable()
                                 .frame(width: w, height: h)
                                 .offset(x: x, y: y)
+                                .opacity(Double(pl.opacity))
                                 .contextMenu {
                                     Button(L("删除本页骑缝章条"), role: .destructive) {
                                         settings.removeQifengPage(index, of: q.id)
@@ -370,7 +389,8 @@ struct PagePreview: View {
                                 y: cy + signs[ci].1 * h / 2 - 7)
                         .highPriorityGesture(resizeGesture(inst: inst, corner: ci,
                                                            cx: cx, cy: cy, w: w, h: h,
-                                                           displayH: displayH))
+                                                           displayH: displayH,
+                                                           resizeUndoID: _resizeUndoID.projectedValue))
                         .onHover { hovering in
                             if hovering { NSCursor.crosshair.push() } else { NSCursor.pop() }
                         }
@@ -391,13 +411,13 @@ struct PagePreview: View {
     /// 拖角等比缩放：对角固定，按指针到对角的垂直距离定新高度
     private func resizeGesture(inst: FullStampInstance, corner: Int,
                                cx: CGFloat, cy: CGFloat, w: CGFloat, h: CGFloat,
-                               displayH: CGFloat) -> some Gesture {
+                               displayH: CGFloat, resizeUndoID: Binding<UUID?>) -> some Gesture {
         DragGesture(minimumDistance: 1, coordinateSpace: .named("page-\(index)"))
             .onChanged { v in
                 guard let i = settings.fullStamps.firstIndex(where: { $0.id == inst.id }) else { return }
-                if resizeUndoID != inst.id {
+                if resizeUndoID.wrappedValue != inst.id {
                     settings.pushUndo(inst.id)   // 本次缩放开始前记快照
-                    resizeUndoID = inst.id
+                    resizeUndoID.wrappedValue = inst.id
                 }
                 let aspect = seals.aspect(for: inst.sealID)
                 let pageH = index < doc.pageSizes.count ? doc.pageSizes[index].height : 842
@@ -418,7 +438,7 @@ struct PagePreview: View {
                     y: min(max(newCy / displayH, 0.02), 0.98))
             }
             .onEnded { _ in
-                resizeUndoID = nil
+                resizeUndoID.wrappedValue = nil
                 // 缩放结束：物理尺寸固化到该章（下次添加沿用）
                 if let cur = settings.selectedInstance {
                     settings.fullWidthCm = cur.widthCm
@@ -481,20 +501,7 @@ private struct FullStampDraggableView: View {
             .opacity(opacity)
             .offset(x: x, y: y)
             // 拖移手势：系统「三指拖移」开启时无需按下即可拖动；鼠标点击按住拖动亦可
-            .gesture(
-                DragGesture(minimumDistance: 1)
-                    .onChanged { v in
-                        if dragStart == nil {
-                            dragStart = settings.anchor(of: instanceID)
-                            settings.pushUndo(instanceID)   // 拖动前记快照
-                        }
-                        guard let s = dragStart else { return }
-                        settings.setAnchor(of: instanceID, to: CGPoint(
-                            x: min(max(s.x + v.translation.width / displayW, 0.02), 0.98),
-                            y: min(max(s.y + v.translation.height / displayH, 0.02), 0.98)))
-                    }
-                    .onEnded { _ in dragStart = nil }
-            )
+            .gesture(dragGesture(dragStart: $dragStart))
             .onTapGesture {
                 // 点击章本身 = 选中它（拖动优先，纯点击才触发）。
                 // 按住 ⌘ 点击：在已有选择上累加 / 取消（多选），其余选中状态保留。
@@ -513,5 +520,21 @@ private struct FullStampDraggableView: View {
                     NSCursor.pop()
                 }
             }
+    }
+
+    // 提取为方法、以 Binding 入参，避开逃逸闭包捕获不可变 self 导致无法改写 @State
+    private func dragGesture(dragStart: Binding<CGPoint?>) -> some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { v in
+                if dragStart.wrappedValue == nil {
+                    dragStart.wrappedValue = settings.anchor(of: instanceID)
+                    settings.pushUndo(instanceID)   // 拖动前记快照
+                }
+                guard let s = dragStart.wrappedValue else { return }
+                settings.setAnchor(of: instanceID, to: CGPoint(
+                    x: min(max(s.x + v.translation.width / displayW, 0.02), 0.98),
+                    y: min(max(s.y + v.translation.height / displayH, 0.02), 0.98)))
+            }
+            .onEnded { _ in dragStart.wrappedValue = nil }
     }
 }

@@ -8,6 +8,23 @@ BUNDLE_ID="com.yin.pdfseal"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
 
+# 构建前先杀掉可能运行的旧实例，避免 open 激活旧进程、且保证覆盖写入新二进制
+pkill -x PDFSeal 2>/dev/null || true
+
+# —— SDK 兼容性规避 ——
+# CLT 27.0（2026-09-12 后台自动更新）的默认 SDK(MacOSX27.0) 把 @State 声明为 SwiftUIMacros 宏，
+# 但宏插件未随 CommandLineTools 发布，所有 @State 均报
+# "external macro implementation type 'SwiftUIMacros.StateMacro' could not be found"。
+# 检测到该问题且本机尚存旧 SDK 时，自动改用 MacOSX26.5.sdk（@State 仍为普通 propertyWrapper）。
+CUR_SDK=$(xcrun --show-sdk-path 2>/dev/null || true)
+SUI_IF="$CUR_SDK/System/Library/Frameworks/SwiftUICore.framework/Modules/SwiftUICore.swiftmodule/arm64e-apple-macos.swiftinterface"
+if [ -f "$SUI_IF" ] && grep -q "StateMacro" "$SUI_IF" \
+   && ! ls /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/ 2>/dev/null | grep -qi swiftuimacros \
+   && [ -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]; then
+  export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+  echo "==> 检测到当前 SDK 缺少 SwiftUIMacros 宏插件，改用 MacOSX26.5.sdk"
+fi
+
 echo "==> Release 编译"
 swift build -c release --disable-sandbox
 
@@ -44,8 +61,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$APP_NAME</string>
     <key>CFBundleDisplayName</key><string>$APP_NAME</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key><string>2.2.0</string>
-    <key>CFBundleShortVersionString</key><string>2.2.0</string>
+    <key>CFBundleVersion</key><string>2.2.14</string>
+    <key>CFBundleShortVersionString</key><string>2.2.14</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>

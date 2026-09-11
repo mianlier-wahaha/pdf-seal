@@ -1,12 +1,17 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// 印章库视图状态（ObservableObject 避免 escaping 闭包里 struct self 不可变）
+private final class SealLibraryState: ObservableObject {
+    @Published var pendingImport: PendingImport?
+    @Published var draggingItem: SealItem?
+}
+
 struct SealLibraryView: View {
     @EnvironmentObject private var seals: SealStore
     @EnvironmentObject private var settings: StampSettings
     @EnvironmentObject private var doc: DocumentStore
-    @State private var pendingImport: PendingImport?
-    @State private var draggingItem: SealItem?
+    @StateObject private var state = SealLibraryState()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,16 +53,13 @@ struct SealLibraryView: View {
                                         settings.applySealPhysicalSize(widthCm: d.widthCm, heightCm: d.heightCm,
                                                                        pageHeightPt: doc.pageSizes.first?.height)
                                     }
-                                    .contextMenu {
-                                        Button(L("删除"), role: .destructive) { seals.delete(item) }
-                                    }
                                     // 拖拽重排：onDrag/onDrop 实时换位。拖起时章图跟随光标，dropEntered 换位。
                                     .onDrag {
-                                        draggingItem = item
+                                        state.draggingItem = item
                                         return NSItemProvider(object: item.id.uuidString as NSString)
                                     }
                                     .onDrop(of: [.text], delegate:
-                                        SealRowDropDelegate(item: item, dragging: $draggingItem, store: seals))
+                                        SealRowDropDelegate(item: item, dragging: $state.draggingItem, store: seals))
                                 if item.id != seals.seals.last?.id {
                                     Divider().padding(.horizontal, 10)
                                 }
@@ -66,7 +68,7 @@ struct SealLibraryView: View {
                     }
                     // 兜底：拖到行与行之间的空隙/卡片空白处松手也能结束并落盘
                     .onDrop(of: [.text], delegate:
-                        SealListDropDelegate(dragging: $draggingItem, store: seals))
+                        SealListDropDelegate(dragging: $state.draggingItem, store: seals))
                     .background(Color(nsColor: .controlBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(
@@ -84,9 +86,9 @@ struct SealLibraryView: View {
                 }
             }
         }
-        .sheet(item: $pendingImport) { pending in
+        .sheet(item: $state.pendingImport) { pending in
             SealCreateSheet(pending: pending) {
-                pendingImport = nil
+                state.pendingImport = nil
             }
         }
     }
@@ -106,7 +108,7 @@ struct SealLibraryView: View {
                 seals.importError = "无法读取图片，请使用 PNG/JPG"
                 return
             }
-            pendingImport = PendingImport(
+            state.pendingImport = PendingImport(
                 image: img,
                 suggestedName: url.deletingPathExtension().lastPathComponent)
         }
@@ -120,9 +122,17 @@ struct SealLibraryView: View {
     }
 }
 
+/// 重命名状态（用 ObservableObject 避免 escaping 闭包里 self 不可变的问题）
+private final class RenameState: ObservableObject {
+    @Published var isRenaming = false
+    @Published var draftName = ""
+}
+
 private struct SealRow: View {
     @EnvironmentObject private var seals: SealStore
     let item: SealItem
+    /// 重命名态：默认 false（名字为不可编辑文本，单击选中不会误触改名）；右键「重命名」才进入编辑
+    @StateObject private var rename = RenameState()
 
     var body: some View {
         VStack(spacing: 6) {
@@ -134,17 +144,38 @@ private struct SealRow: View {
                 }
             }
             .frame(width: 64, height: 64)
-            TextField("", text: nameBinding)
-                .textFieldStyle(.plain)
-                .font(.caption)
-                .multilineTextAlignment(.center)
+
+            if rename.isRenaming {
+                TextField("", text: $rename.draftName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .onSubmit {
+                        let trimmed = rename.draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty { seals.rename(item, to: trimmed) }
+                        rename.isRenaming = false
+                    }
+                    .onExitCommand {
+                        rename.isRenaming = false
+                    }
+            } else {
+                Text(item.name)
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 6)
-    }
-
-    private var nameBinding: Binding<String> {
-        Binding(get: { item.name }, set: { seals.rename(item, to: $0) })
+        .contextMenu {
+            Button {
+                rename.draftName = item.name
+                rename.isRenaming = true
+            } label: { Label(L("重命名"), systemImage: "pencil") }
+            Divider()
+            Button(L("删除"), role: .destructive) { seals.delete(item) }
+        }
     }
 }
 

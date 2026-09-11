@@ -99,6 +99,38 @@ do {
                                     out: workDir.appendingPathComponent(name))
         report("  - 渲染 \(name)")
     }
+    // 场景 5：首页占比加大——验证尾页源区间终点对齐整数边界（本份章最右缘）
+    // 覆盖模式 A（middleRatioEnabled=true）和模式 B（false：首尾同占比+中间均分）
+    report("场景 5：尾页右缘对齐验证")
+    for (n, first, middle, middleOn) in [(5, 0.25, 0.15, true), (6, 0.25, 0.15, true),
+                                        (7, 0.25, 0.15, true), (8, 0.25, 0.15, true),
+                                        (10, 0.25, 0.15, true), (2, 0.25, 0.15, true),
+                                        (7, 0.25, 0.15, false), (10, 0.25, 0.15, false),
+                                        (3, 0.25, 0.15, false)] {
+        var qc = QifengConfig()
+        qc.edge = .right
+        qc.range = 0...(n - 1)
+        qc.firstPageLarger = true
+        qc.firstPageRatio = CGFloat(first)
+        qc.middleRatio = CGFloat(middle)
+        qc.middleRatioEnabled = middleOn
+        let sizes = Array(repeating: CGSize(width: 595, height: 842), count: n)
+        let pls = StampGeometry.qifeng(config: qc, pageSizes: sizes, sealAspect: 1.0, opacity: 0.9)
+        guard let lastPage = pls.last else { report("✗ n=\(n) middleOn=\(middleOn)：无尾页贴片"); continue }
+        let end = lastPage.source.maxX
+        let isEdge = abs(end - end.rounded(.up)) < 1e-6 || abs(end - 1) < 1e-6
+        report("  n=\(n) middleOn=\(middleOn) 尾页源区间终点=\(end) \(isEdge ? "✓ 对齐右缘" : "✗ 未对齐！")")
+    }
+    // 均分模式（不开首页占比）也应尾页到 1.0
+    do {
+        var qc = QifengConfig()
+        qc.range = 0...6
+        let sizes = Array(repeating: CGSize(width: 595, height: 842), count: 7)
+        let pls = StampGeometry.qifeng(config: qc, pageSizes: sizes, sealAspect: 1.0, opacity: 0.9)
+        let end = pls.last?.source.maxX ?? 0
+        report("  均分 n=7 尾页源区间终点=\(end) \(abs(end - 1) < 1e-6 ? "✓ 对齐右缘" : "✗ 未对齐！")")
+    }
+
     report("全部验证产物已写入 \(workDir.path)")
 
     // 附加实验：真实导出器处理带 /Rotate 90 的单页样本

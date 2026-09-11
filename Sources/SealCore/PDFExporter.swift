@@ -140,7 +140,8 @@ public enum PDFExporter {
 
     private static func sizeKey(_ s: CGSize) -> String { "\(Int(s.width))x\(Int(s.height))" }
 
-    private static func drawPlacement(_ pl: StampPlacement, seal: CGImage, in ctx: CGContext) {
+    /// 绘制单枚贴片（供 SealTool 验证复用）
+    public static func drawPlacement(_ pl: StampPlacement, seal: CGImage, in ctx: CGContext) {
         let iw = CGFloat(seal.width), ih = CGFloat(seal.height)
         let crop = CGRect(x: pl.source.minX * iw, y: pl.source.minY * ih,
                           width: pl.source.width * iw, height: pl.source.height * ih)

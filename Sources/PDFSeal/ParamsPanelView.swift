@@ -31,9 +31,57 @@ struct ParamsPanelView: View {
                         }
                         Text(L("下")).font(.caption).foregroundStyle(.secondary)
                     }
+                    // 首页占比加大：开关开启后显示占比滑杆
+                    Toggle(L("首页占比加大"), isOn: $settings.qifengFirstPageLarger)
+                    if settings.qifengFirstPageLarger {
+                        HStack(spacing: 8) {
+                            Text(L("首页占比")).font(.callout)
+                            OffsetSlider(value: settings.qifengFirstPageRatio,
+                                         range: 0.10...0.40) { v in
+                                settings.qifengFirstPageRatio = v
+                                if let last = settings.qifengStamps.indices.last {
+                                    settings.qifengStamps[last].firstPageLarger = true
+                                    settings.qifengStamps[last].firstPageRatio = v
+                                }
+                            }
+                            Text(LF("%.0f%%", settings.qifengFirstPageRatio * 100))
+                                .font(.caption).monospacedDigit()
+                                .frame(width: 40)
+                        }
+                        Toggle(L("内页占比控制"), isOn: $settings.qifengMiddleRatioEnabled)
+                            .onChange(of: settings.qifengMiddleRatioEnabled) { v in
+                                if let last = settings.qifengStamps.indices.last {
+                                    settings.qifengStamps[last].firstPageLarger = true
+                                    settings.qifengStamps[last].middleRatioEnabled = v
+                                }
+                            }
+                        if settings.qifengMiddleRatioEnabled {
+                            HStack(spacing: 8) {
+                                Text(L("内页占比")).font(.callout)
+                                OffsetSlider(value: settings.qifengMiddleRatio,
+                                             range: 0.05...0.40) { v in
+                                    settings.qifengMiddleRatio = v
+                                    if let last = settings.qifengStamps.indices.last {
+                                        settings.qifengStamps[last].firstPageLarger = true
+                                        settings.qifengStamps[last].middleRatio = v
+                                    }
+                                }
+                                Text(LF("%.0f%%", settings.qifengMiddleRatio * 100))
+                                    .font(.caption).monospacedDigit()
+                                    .frame(width: 40)
+                            }
+                            Text(L("首页占首页占比，中间页各占内页占比，尾页取剩余部分并贴到印章最边缘；各页占比之和超过 100% 时自动以多份印章平铺展示"))
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text(L("首尾页各占首页占比，中间页均分剩余占比；尾页贴到印章最边缘"))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     HStack(spacing: 10) {
                         Button {
                             settings.addQifengStamp(sealID: seals.selectedID)
+                            // 同样让右栏文本框失焦，避免后续快捷键误作用在页码框上
+                            NSApp.keyWindow?.makeFirstResponder(nil)
                         } label: {
                             Label(L("添加"), systemImage: "plus.circle.fill")
                                 .frame(maxWidth: .infinity)
@@ -63,6 +111,9 @@ struct ParamsPanelView: View {
                     HStack(spacing: 10) {
                         Button {
                             settings.addFullStamp(sealID: seals.selectedID)
+                            // 添加后把焦点从右栏页码等文本框移走，使刚盖的章成为当前"目标"，
+                            // 否则 Delete 会落在 field editor 上删页码数字而不是删选中的章。
+                            NSApp.keyWindow?.makeFirstResponder(nil)
                         } label: {
                             Label(L("添加"), systemImage: "plus.circle.fill")
                                 .frame(maxWidth: .infinity)

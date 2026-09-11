@@ -13,8 +13,6 @@ struct ContentView: View {
     @State private var showJigsaw = false
     @State private var statusText: String?
     @State private var errorText: String?
-    @State private var keyMonitor: Any?
-    @State private var flagsMonitor: Any?
     @State private var showCloseConfirm = false
     /// 印章库面板宽度（拖右侧边界调整，跨启动记忆）
     @AppStorage("libraryWidth") private var libraryWidth: Double = 220
@@ -53,63 +51,6 @@ struct ContentView: View {
             let d = seals.physicalSize(for: seals.selectedID)
             settings.applySealPhysicalSize(widthCm: d.widthCm, heightCm: d.heightCm,
                                            pageHeightPt: doc.pageSizes.first?.height)
-            installKeyMonitor()
-        }
-        .onDisappear {
-            if let m = keyMonitor {
-                NSEvent.removeMonitor(m)
-                keyMonitor = nil
-            }
-            if let m = flagsMonitor {
-                NSEvent.removeMonitor(m)
-                flagsMonitor = nil
-            }
-        }
-    }
-
-    /// 全局键盘：Esc 取消选中章；⌘Z / Ctrl+Z 撤销该章上一次调整
-    private func installKeyMonitor() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // 仅当文本框正在编辑（字段编辑器激活）时放行给系统
-            if let tv = NSApp.keyWindow?.firstResponder as? NSTextView, tv.isFieldEditor {
-                return event
-            }
-            // ↑/↓（126/125）：印章库已选中某章时上下移动其顺序（与 Esc/Delete 同范围，非文本编辑时全局生效）
-            if (event.keyCode == 126 || event.keyCode == 125), seals.selectedID != nil {
-                seals.moveSelectedSeal(by: event.keyCode == 126 ? -1 : 1)
-                return nil
-            }
-            let isEsc = event.keyCode == 53 || event.characters == "\u{1b}"
-            if isEsc {
-                if !settings.selectedFullStampIDs.isEmpty {
-                    settings.clearSelection()
-                    return nil
-                }
-                return event
-            }
-            if event.keyCode == 6, event.characters?.lowercased() == "z",
-               event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
-                if settings.undo() {
-                    return nil
-                }
-            }
-            // Delete 键（kVK_Delete = 51）：移除选中的全部正文章（支持多选）。
-            // 仅拦截裸按的 Delete；带 cmd/option 的组合键放行给系统，避免与 macOS
-            // 「delete to start of line」「option-delete 按词删除」等编辑快捷键冲突。
-            if event.keyCode == 51,
-               !event.modifierFlags.contains(.command),
-               !event.modifierFlags.contains(.option),
-               !settings.selectedFullStampIDs.isEmpty {
-                settings.removeSelectedFullStamps()
-                return nil
-            }
-            return event
-        }
-        // ⌘ 键实时状态：flagsChanged 在修饰键变化瞬间同步触发，写入 settings.commandKeyDown，
-        // 供预览中章的点击手势判定「⌘ 点击多选」。不能读 NSEvent.modifierFlags（异步不可靠）。
-        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
-            settings.commandKeyDown = event.modifierFlags.contains(.command)
-            return event
         }
     }
 
@@ -228,6 +169,10 @@ struct ContentView: View {
             c.range = q.effectiveRange(pageCount: doc.pageCount)
             c.sizeRatio = CGFloat(q.size)
             c.offset = CGFloat(q.offset)
+            c.firstPageLarger = q.firstPageLarger
+            c.firstPageRatio = CGFloat(q.firstPageRatio)
+            c.middleRatioEnabled = q.middleRatioEnabled
+            c.middleRatio = CGFloat(q.middleRatio)
             let qAspect = seals.aspect(for: q.sealID)
             for var pl in StampGeometry.qifeng(config: c,
                                                pageSizes: doc.pageSizes, sealAspect: qAspect,
