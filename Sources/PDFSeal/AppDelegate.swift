@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didBind = false
     /// 供窗口关闭代理读取当前文档（避免循环依赖）
     static var docRef: DocumentStore?
+    /// 冷启动竞态缓冲：odoc 事件先于 bind 到达时暂存待打开的 PDF
+    private var pendingOpenURL: URL?
 
     /// 由 PDFSealApp 在 body 中调用，但内部幂等（仅首次真正订阅）。
     /// ⚠️ 曾在 body 中裸调导致死循环：每次 body 重算都新建 sink，Combine 订阅即重放当前值
@@ -32,6 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.settings = settings
         AppDelegate.docRef = doc
         installIfNeeded()
+        // 冷启动时 odoc 事件可能先于 bind 到达：补载暂存的 PDF
+        if let pending = pendingOpenURL {
+            pendingOpenURL = nil
+            doc.load(pending)
+        }
         // 任何「文档内容」变更（骑缝章数组 / 正文章数组 / 水印配置）即标记未保存；
         // 选中状态(选章)等不改变文档内容的变动不触发，避免误报。
         // dropFirst() 跳过订阅瞬间对当前值的重放，否则会把 isDirty 从 false 误置 true。
@@ -100,6 +107,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         return event
+    }
+
+    /// 注册「打开文档」Apple 事件：访达「打开方式」/双击 PDF 时由系统投递 odoc 事件。
+    /// 必须在 applicationWillFinishLaunching 安装——odoc 事件在 finishLaunching 后即投递，
+    /// 装晚了（如 applicationDidFinishLaunching 之后）冷启动会丢事件。
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleOpenDocEvent(_:withReplyEvent:)),
+            forEventClass: kCoreEventClass,
+            andEventID: kAEOpenDocuments
+        )
+    }
+
+    /// odoc 事件处理：从事件中提取文件 URL，取第一个 PDF 载入。
+    /// nonisolated：Apple 事件回调不由 Swift 并发系统调度，须手动回到主线程。
+    @objc nonisolated private func handleOpenDocEvent(_ event: NSAppleEventDescriptor,
+                                                     withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let list = event.paramDescriptor(forKeyword: keyDirectObject) else { return }
+        var urls: [URL] = []
+        if list.descriptorType == typeAEList {
+            for i in 1...max(list.numberOfItems, 0) {
+                if let u = list.atIndex(i)?.fileURLValue { urls.append(u) }
+            }
+        } else if let u = list.fileURLValue {
+            urls.append(u)
+        }
+        guard let url = urls.first(where: { $0.pathExtension.lowercased() == "pdf" }) else { return }
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { self.openDocument(at: url) }
+        }
+    }
+
+    /// 载入外部打开的 PDF；store 尚未绑定（冷启动竞态）时先挂起，bind 时补载
+    func openDocument(at url: URL) {
+        if let doc = Self.docRef ?? doc {
+            doc.load(url)
+        } else {
+            pendingOpenURL = url
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

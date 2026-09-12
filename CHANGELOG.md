@@ -2,6 +2,14 @@
 
 所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [2.2.16] - 2026-09-12
+### 新增
+- **访达「打开方式」支持**：在访达中右键 PDF →「打开方式」可直接选择「PDF骑缝章」；双击 PDF 也能在系统的「打开方式」里选本 app 打开并自动载入该文件。
+
+### 技术
+- `Info.plist` 新增 `CFBundleDocumentTypes`（`com.adobe.pdf`，Editor 角色，Alternate 优先级），打包后用 `lsregister -f` 强制注册 LaunchServices。
+- `AppDelegate` 在 `applicationWillFinishLaunching` 注册 `kAEOpenDocuments` Apple 事件处理器，提取文件 URL 载入；冷启动时事件先于 `bind` 到达的场景用 `pendingOpenURL` 暂存补载。
+
 ## [2.2.15] - 2026-09-12
 ### 新增
 - **窗口关闭未保存确认**：点击窗口红 X（或工具栏「关闭」）时，若当前文档有未保存改动（已添加/调整印章或水印），弹出「该文件尚未保存，是否关闭？」（按钮：取消 / 确认）；未修改或已保存/已导出状态下点击关闭则直接关闭，不再询问。

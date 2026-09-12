@@ -61,14 +61,26 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$APP_NAME</string>
     <key>CFBundleDisplayName</key><string>$APP_NAME</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key><string>2.2.15</string>
-    <key>CFBundleShortVersionString</key><string>2.2.15</string>
+    <key>CFBundleVersion</key><string>2.2.16</string>
+    <key>CFBundleShortVersionString</key><string>2.2.16</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>PDF Document</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.adobe.pdf</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
@@ -91,6 +103,9 @@ cd ..
 
 echo "完成: $APP"
 echo "release 产物: release/$APP_NAME.app | release/$APP_NAME.zip | release/$APP_NAME.dmg"
+
+echo "==> 注册 LaunchServices（访达「打开方式」列出本 app 的前提）"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "release/$APP_NAME.app"
 
 # 打包完自动打开（用户约定：免手动到路径下打开）
 open "release/$APP_NAME.app"
