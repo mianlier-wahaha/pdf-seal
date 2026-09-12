@@ -31,6 +31,7 @@ struct ContentView: View {
                 .frame(width: 268)
         }
         .sheet(isPresented: $showJigsaw) { JigsawView() }
+        .background(WindowAccessor())
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first(where: { $0.pathExtension.lowercased() == "pdf" }) else { return false }
             openPDF(url)
@@ -41,10 +42,10 @@ struct ContentView: View {
         } message: { Text(errorText ?? "") }
         .onReceive(doc.$loadError) { _ in if let e = doc.loadError { errorText = e; doc.loadError = nil } }
         .onReceive(seals.$importError) { _ in if let e = seals.importError { errorText = e; seals.importError = nil } }
-        .confirmationDialog(L("是否确认关闭？"), isPresented: $showCloseConfirm,
+        .confirmationDialog(L("该文件尚未保存，是否关闭？"), isPresented: $showCloseConfirm,
                             titleVisibility: .visible) {
             Button(L("取消"), role: .cancel) {}
-            Button(L("确定")) { closeDoc() }
+            Button(L("确认")) { closeDoc() }
         }
         .onAppear {
             // 启动时套用上次所用章的固定物理尺寸
@@ -59,6 +60,7 @@ struct ContentView: View {
         doc.load(url)
         if scoped { url.stopAccessingSecurityScopedResource() }
         settings.syncPageCount(doc.pageCount)
+        doc.isDirty = false   // 刚打开文件，尚无未保存改动（syncPageCount 的清空会触发脏标记，这里回置）
         statusText = doc.url == nil ? nil : LF("已载入 %d 页", doc.pageCount)
     }
 
@@ -105,6 +107,7 @@ struct ContentView: View {
                                    placements: base?.placements ?? [], seals: base?.seals ?? [:],
                                    watermark: wmParams?.config, watermarkPages: wmParams?.pages)
             statusText = LF("已保存：%@", doc.displayName)
+            doc.isDirty = false   // 原地保存后无未保存改动
         } catch {
             errorText = error.localizedDescription
         }
@@ -137,7 +140,13 @@ struct ContentView: View {
                         .disabled(doc.document == nil || (seals.selectedID == nil && !settings.watermark.isActive))
                     Button { exportPDF() } label: { Label(L("另存为"), systemImage: "square.and.arrow.down") }
                         .disabled(doc.document == nil || (seals.selectedID == nil && !settings.watermark.isActive))
-                    Button { showCloseConfirm = true } label: { Label(L("关闭"), systemImage: "xmark.circle") }
+                    Button {
+                        if doc.isDirty {
+                            showCloseConfirm = true
+                        } else {
+                            closeDoc()
+                        }
+                    } label: { Label(L("关闭"), systemImage: "xmark.circle") }
                         .disabled(doc.document == nil)
                     Spacer()
                     Text("\(doc.displayName) · \(doc.pageCount) 页")
@@ -229,6 +238,7 @@ struct ContentView: View {
                                        placements: base?.placements ?? [], seals: base?.seals ?? [:],
                                        watermark: wmParams?.config, watermarkPages: wmParams?.pages)
                 statusText = LF("已导出：%@", target.lastPathComponent)
+                doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
             } catch {
                 errorText = error.localizedDescription
             }

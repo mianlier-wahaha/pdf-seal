@@ -11,6 +11,8 @@ final class DocumentStore: ObservableObject {
     @Published var url: URL?
     @Published var pageSizes: [CGSize] = []
     @Published var loadError: String?
+    /// 当前文档是否有未保存的改动（盖章/水印编辑后置 true；保存或打开/关闭文件后置 false）
+    @Published var isDirty: Bool = false
 
     var displayName: String { url?.lastPathComponent ?? "未打开文件" }
     var pageCount: Int { pageSizes.count }
@@ -29,6 +31,7 @@ final class DocumentStore: ObservableObject {
             return PageBox.displayedSize(p)
         }
         loadError = nil
+        isDirty = false
     }
 
     /// 关闭当前文档
@@ -37,6 +40,7 @@ final class DocumentStore: ObservableObject {
         url = nil
         pageSizes = []
         loadError = nil
+        isDirty = false
     }
 }
 

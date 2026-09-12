@@ -2,6 +2,17 @@
 
 所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [2.2.15] - 2026-09-12
+### 新增
+- **窗口关闭未保存确认**：点击窗口红 X（或工具栏「关闭」）时，若当前文档有未保存改动（已添加/调整印章或水印），弹出「该文件尚未保存，是否关闭？」（按钮：取消 / 确认）；未修改或已保存/已导出状态下点击关闭则直接关闭，不再询问。
+
+### 技术
+- `DocumentStore` 新增 `isDirty` 脏标记；`AppDelegate` 监听 `qifengStamps`/`fullStamps`/`watermark` 三个 `@Published` 变更自动置脏（仅内容变更，选中章等状态变化不触发）。
+- 通过 `NSWindowDelegate` 转发代理（`CloseGuard`）拦截 `windowShouldClose`，保留 SwiftUI 原生 window delegate 行为；保存（原地覆盖）与另存为成功后置 `isDirty = false`。
+
+### 修复
+- **修复启动即卡死（99% CPU 死循环）**：`bind()` 原本写在 `App.body` 内，每次 SwiftUI 重算 body 都会新建 3 个 `sink`；而 Combine 订阅 `@Published` 会立即重放当前值，把 `isDirty` 误置 `true` → 视图失效 → 再重算 body → 再建 sink…，形成无限重绘且订阅集合无限膨胀。改为 `bind` 加 `didBind` 幂等守卫（仅首次真正订阅），并用 `dropFirst()` 跳过订阅瞬间的初始重放，避免启动即误报未保存。
+
 ## [2.2.14] - 2026-09-12
 ### 回退
 - **整体回退 2.2.13 的纸厚渐变功能**：该改动导致骑缝章预览/导出异常（功能失效）。删除 `StampPlacement` 的 `fadeWidth`/`fadeAlpha`/`fadeAtMaxX`、`QifengConfig` 的 `fadeWidthMm`/`fadeEdgeAlpha`、导出端灰度 mask 与预览端 `LinearGradient` mask，行为恢复至 2.2.12。预览端保留 `.opacity(pl.opacity)`（修复预览忽略透明度的既有不一致，风险极低）。
