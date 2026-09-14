@@ -137,7 +137,7 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     Button { pickPDF() } label: { Label(L("打开"), systemImage: "doc") }
                     Button { saveInPlace() } label: { Label(L("保存"), systemImage: "arrow.down.doc") }
-                        .disabled(doc.document == nil || (seals.selectedID == nil && !settings.watermark.isActive))
+                        .disabled(doc.document == nil)
                     Button { exportPDF() } label: { Label(L("另存为"), systemImage: "square.and.arrow.down") }
                         .disabled(doc.document == nil || (seals.selectedID == nil && !settings.watermark.isActive))
                     Button {
@@ -223,9 +223,6 @@ struct ContentView: View {
         guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
         let base = try? buildPlacements()
         let wmParams = watermarkParams
-        guard base != nil || wmParams != nil else {
-            errorText = L("请先添加印章或启用水印再导出"); return
-        }
         let panel = NSSavePanel()
         let stem = doc.url!.deletingPathExtension().lastPathComponent
         panel.directoryURL = doc.url!.deletingLastPathComponent()   // 默认原文件所在文件夹

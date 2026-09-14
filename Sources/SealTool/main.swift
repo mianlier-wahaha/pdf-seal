@@ -131,6 +131,58 @@ do {
         report("  均分 n=7 尾页源区间终点=\(end) \(abs(end - 1) < 1e-6 ? "✓ 对齐右缘" : "✗ 未对齐！")")
     }
 
+    // 场景 6：注释压平——模拟 PDF Expert 未压平印章（注释层），导出后应保留且几何与显示一致
+    do {
+        let annotSrc = workDir.appendingPathComponent("annot-src.pdf")
+        if let d0 = PDFDocument(url: pdfURL) {
+            for idx in [0, 2] {   // 第 1 页（不旋转）+ 第 3 页（/Rotate 90）
+                let ann = PDFAnnotation(bounds: CGRect(x: 300, y: 200, width: 140, height: 90),
+                                        forType: .square, withProperties: nil)
+                ann.color = .red
+                ann.interiorColor = .red
+                d0.page(at: idx)!.addAnnotation(ann)
+            }
+            try d0.dataRepresentation()!.write(to: annotSrc)
+        }
+        let outAnnot = workDir.appendingPathComponent("annot-flattened.pdf")
+        try PDFExporter.export(input: annotSrc, output: outAnnot, placements: [], seals: [:])
+
+        func redCentroid(_ doc: PDFDocument, _ idx: Int, _ size: CGSize) -> CGPoint? {
+            guard let page = doc.page(at: idx),
+                  let tiff = page.thumbnail(of: size, for: .mediaBox).tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff) else { return nil }
+            var n = 0.0, x = 0.0, y = 0.0
+            for py in 0..<rep.pixelsHigh {
+                for px in 0..<rep.pixelsWide {
+                    if let c = rep.colorAt(x: px, y: py),
+                       c.redComponent > 0.55, c.greenComponent < 0.45, c.blueComponent < 0.45 {
+                        n += 1; x += Double(px); y += Double(py)
+                    }
+                }
+            }
+            guard n > 0 else { return nil }
+            return CGPoint(x: x / n / Double(rep.pixelsWide), y: y / n / Double(rep.pixelsHigh))
+        }
+        let srcDoc = PDFDocument(url: annotSrc)
+        let outDoc = PDFDocument(url: outAnnot)
+        guard let srcDoc, let outDoc else {
+            report("✗ 注释压平：文档无法打开"); exit(1)
+        }
+        for idx in [0, 2] {
+            guard let sp = srcDoc.page(at: idx), let op = outDoc.page(at: idx) else {
+                report("✗ 注释压平 p\(idx+1)：页缺失"); exit(1)
+            }
+            let disp = PageBox.displayedSize(sp)
+            guard let sc = redCentroid(srcDoc, idx, disp), let oc = redCentroid(outDoc, idx, disp) else {
+                report("✗ 注释压平 p\(idx+1)：输出中找不到注释像素（注释被丢弃）！"); exit(1)
+            }
+            let dx = abs(sc.x - oc.x), dy = abs(sc.y - oc.y)
+            let ok = dx < 0.015 && dy < 0.015
+            report("✓ 注释压平 p\(idx+1) 源=(\(String(format: "%.3f", sc.x)),\(String(format: "%.3f", sc.y))) 输出=(\(String(format: "%.3f", oc.x)),\(String(format: "%.3f", oc.y))) 偏移=(\(String(format: "%.4f", dx)),\(String(format: "%.4f", dy))) \(ok ? "几何一致 ✓" : "✗ 几何偏移！")")
+            if !ok { exit(1) }
+        }
+    }
+
     report("全部验证产物已写入 \(workDir.path)")
 
     // 附加实验：真实导出器处理带 /Rotate 90 的单页样本

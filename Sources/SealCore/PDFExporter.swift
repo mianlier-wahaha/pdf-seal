@@ -37,6 +37,11 @@ public enum PDFExporter {
                               watermarkPages: ClosedRange<Int>? = nil) throws {
         guard let doc = CGPDFDocument(input as CFURL) else { throw SealError.cannotOpenInput }
         let pageCount = doc.numberOfPages
+        // PDFKit 侧文档：用于压平原文件的注释层（外部工具如 PDF Expert 未压平的印章/批注）。
+        // drawPDFPage 只画页面内容流会丢弃注释；PDFPage.draw(with:to:) 内容+注释一起画，
+        // 且内部自动处理 /Rotate（实验证实：不手动加旋转变换时，内容与注释几何与 PDFKit 显示完全一致；
+        // 叠加手动变换反而双重旋转）。压平页绘制后当前用户空间即显示空间，水印/章直接按显示坐标绘制。
+        let kitDoc = PDFDocument(url: input)
 
         struct PageMeta {
             let index: Int          // 0-based 原始页码
@@ -86,27 +91,34 @@ public enum PDFExporter {
             }
             for m in pages {
                 ctx.beginPDFPage(nil)
-                // 原页内容：显示空间 → 原始用户空间
-                ctx.saveGState()
-                switch m.angle {
-                case 90:
-                    ctx.concatenate(CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: m.mb.width))
-                case 180:
-                    ctx.concatenate(CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: m.mb.width, ty: m.mb.height))
-                case 270:
-                    ctx.concatenate(CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: m.mb.height, ty: 0))
-                default:
-                    break
+                if let kitPage = kitDoc?.page(at: m.index), !kitPage.annotations.isEmpty {
+                    // 压平注释层：内容+注释一起绘入，/Rotate 由 PDFKit 内部处理。
+                    // 绘制后当前用户空间即显示空间（勿再叠加手动旋转，否则双重旋转）。
+                    kitPage.draw(with: .mediaBox, to: ctx)
+                } else {
+                    // 原页内容：显示空间 → 原始用户空间
+                    ctx.saveGState()
+                    switch m.angle {
+                    case 90:
+                        ctx.concatenate(CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: m.mb.width))
+                    case 180:
+                        ctx.concatenate(CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: m.mb.width, ty: m.mb.height))
+                    case 270:
+                        ctx.concatenate(CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: m.mb.height, ty: 0))
+                    default:
+                        break
+                    }
+                    if let page = doc.page(at: m.index + 1) {
+                        ctx.drawPDFPage(page)
+                    }
+                    ctx.restoreGState()
                 }
-                if let page = doc.page(at: m.index + 1) {
-                    ctx.drawPDFPage(page)
-                }
-                // 水印层：与页面同一显示空间（已含 /Rotate 变换），垫在章之下
+                // 水印层：WatermarkRenderer 契约为页面显示坐标系，须画在变换外（此前画在
+                // 旋转变换内导致旋转页水印错位），垫在章之下
                 if let wm = watermark,
                    watermarkPages?.contains(m.index) ?? true {
                     WatermarkRenderer.draw(wm, in: ctx, pageSize: m.size)
                 }
-                ctx.restoreGState()
 
                 for pl in (byPage[m.index] ?? []).sorted(by: { $0.source.minX < $1.source.minX }) {
                     guard let sealImg = seals[pl.sealKey] else { continue }
