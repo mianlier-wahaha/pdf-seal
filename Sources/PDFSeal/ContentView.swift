@@ -1,36 +1,33 @@
 import SwiftUI
+import AppKit
 import PDFKit
 import CoreGraphics
 import UniformTypeIdentifiers
 import SealCore
+
+// MARK: - 主入口壳：预览（默认）/ 盖章 / 页面管理 + 顶栏 打开·保存·另存为
+
+enum MainEntry: Hashable {
+    case preview, stamp, pageManage
+}
+
 
 struct ContentView: View {
     @EnvironmentObject private var doc: DocumentStore
     @EnvironmentObject private var seals: SealStore
     @EnvironmentObject private var settings: StampSettings
 
-    
-    @State private var showJigsaw = false
+    @State private var entry: MainEntry = .preview
     @State private var statusText: String?
     @State private var errorText: String?
-    @State private var showCloseConfirm = false
-    /// 印章库面板宽度（拖右侧边界调整，跨启动记忆）
-    @AppStorage("libraryWidth") private var libraryWidth: Double = 220
 
     var body: some View {
-        HStack(spacing: 0) {
-            SealLibraryView()
-                .frame(width: libraryWidth)
-            LibraryWidthDivider(width: $libraryWidth)
-            VStack(spacing: 0) {
-                previewArea
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            mainContent
             Divider()
-            ParamsPanelView()
-                .frame(width: 268)
+            statusBar
         }
-        .sheet(isPresented: $showJigsaw) { JigsawView() }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WindowAccessor())
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first(where: { $0.pathExtension.lowercased() == "pdf" }) else { return false }
@@ -42,18 +39,104 @@ struct ContentView: View {
         } message: { Text(errorText ?? "") }
         .onReceive(doc.$loadError) { _ in if let e = doc.loadError { errorText = e; doc.loadError = nil } }
         .onReceive(seals.$importError) { _ in if let e = seals.importError { errorText = e; seals.importError = nil } }
-        .confirmationDialog(L("该文件尚未保存，是否关闭？"), isPresented: $showCloseConfirm,
-                            titleVisibility: .visible) {
-            Button(L("取消"), role: .cancel) {}
-            Button(L("确认")) { closeDoc() }
-        }
+        .onReceive(NotificationCenter.default.publisher(for: .menuOpenPDF)) { _ in pickPDF() }
+        .onReceive(NotificationCenter.default.publisher(for: .menuSavePDF)) { _ in if doc.document != nil { saveInPlace() } }
+        .onReceive(NotificationCenter.default.publisher(for: .menuSaveAsPDF)) { _ in if doc.document != nil { exportPDF() } }
         .onAppear {
-            // 启动时套用上次所用章的固定物理尺寸
             let d = seals.physicalSize(for: seals.selectedID)
             settings.applySealPhysicalSize(widthCm: d.widthCm, heightCm: d.heightCm,
                                            pageHeightPt: doc.pageSizes.first?.height)
         }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                // 纯文字三段：分段选择器会把复合视图的子元素拆成独立段，图标只能整体放弃
+                Picker("", selection: $entry) {
+                    Text(L("预览")).tag(MainEntry.preview)
+                    Text(L("盖章")).tag(MainEntry.stamp)
+                    Text(L("页面管理")).tag(MainEntry.pageManage)
+                }
+                .pickerStyle(.segmented)
+            }
+            ToolbarItemGroup(placement: .navigation) {
+                Button { doc.undoPageEdit(settings: settings) } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .disabled(!doc.canUndoPageEdit)
+                .help(L("撤销页面操作（⌘Z）"))
+                Button { doc.redoPageEdit(settings: settings) } label: {
+                    Image(systemName: "arrow.uturn.forward")
+                }
+                .disabled(!doc.canRedoPageEdit)
+                .help(L("重做页面操作（⇧⌘Z）"))
+            }
+            ToolbarItemGroup(placement: .navigation) {
+                Button {} label: { toolLabel("pencil", L("编辑")) }
+                    .disabled(true)
+                    .help(L("未来预留"))
+                Button { pickPDF() } label: { toolLabel("doc", L("打开")) }
+                    .help(L("打开 PDF 文件"))
+                Button { saveInPlace() } label: { toolLabel("arrow.down.doc", L("保存")) }
+                    .disabled(doc.document == nil)
+                    .help(L("原地保存（⌘S）"))
+                Button { exportPDF() } label: { toolLabel("square.and.arrow.down", L("另存为")) }
+                    .disabled(doc.document == nil)
+                    .help(L("另存为新文件（⇧⌘S）"))
+            }
+        }
     }
+
+
+    /// 顶栏功能块：图标 + 文字并排，保证功能一目了然
+    private func toolLabel(_ icon: String, _ text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .medium))
+            Text(text).font(.system(size: 12))
+        }
+    }
+
+    @ViewBuilder
+    private var mainContent: some View {
+        if doc.document == nil {
+            VStack(spacing: 14) {
+                Image(systemName: "doc.badge.plus")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.secondary)
+                Text(L("把 PDF 拖进来，或点「打开」选择文件"))
+                    .foregroundStyle(.secondary)
+                Button(L("打开 PDF…")) { pickPDF() }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            switch entry {
+            case .preview: PreviewMainView()
+            case .stamp: StampWorkspaceView(statusText: statusText)
+            case .pageManage: PageManageView(onOpenPage: openInPreview)
+            }
+        }
+    }
+
+    private var statusBar: some View {
+        HStack(spacing: 12) {
+            Text(doc.document == nil ? L("未打开文件") : "\(doc.displayName) · \(doc.pageCount) 页")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+            if let s = statusText {
+                Text(s).font(.callout).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 5)
+    }
+
+    /// 页面管理双击某页 → 切到预览并定位
+    private func openInPreview(_ pageIndex: Int) {
+        entry = .preview
+        doc.pendingJumpPage = pageIndex
+    }
+
+    // MARK: 文件操作
 
     private func openPDF(_ url: URL) {
         let scoped = url.startAccessingSecurityScopedResource()
@@ -94,13 +177,28 @@ struct ContentView: View {
         return (wm, min(s, e)...max(s, e))
     }
 
-    /// 保存：用盖章结果覆盖当前文件
+    /// 页面结构改动未落盘时，先把基础文档写回原文件
+    @discardableResult
+    private func flushPageEdits() -> Bool {
+        guard doc.hasPageEdits, let url = doc.url, let d = doc.document else { return true }
+        guard d.write(to: url) else {
+            errorText = L("页面改动写入失败"); return false
+        }
+        doc.hasPageEdits = false
+        return true
+    }
+
+    /// 保存：页面改动写回原文件；有章/水印时再盖章导出覆盖
     private func saveInPlace() {
         guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
+        guard flushPageEdits() else { return }
         let base = try? buildPlacements()
         let wmParams = watermarkParams
-        guard base != nil || wmParams != nil else {
-            errorText = L("请先添加印章或启用水印再保存"); return
+        if base == nil && wmParams == nil {
+            // 无章无水印：基础文档已写盘，仅页面改动
+            statusText = LF("已保存：%@", doc.displayName)
+            doc.isDirty = false
+            return
         }
         do {
             try PDFExporter.export(input: doc.url!, output: doc.url!,
@@ -113,52 +211,38 @@ struct ContentView: View {
         }
     }
 
-    /// 关闭当前文档
-    private func closeDoc() {
-        doc.close()
-        settings.clearDocumentState()
-        statusText = nil
-    }
-
-    @ViewBuilder
-    private var previewArea: some View {
-        if doc.document == nil {
-            VStack(spacing: 14) {
-                Image(systemName: "doc.badge.plus")
-                    .font(.system(size: 44))
-                    .foregroundStyle(.secondary)
-                Text(L("把 PDF 拖进来，或点「打开」选择文件"))
-                    .foregroundStyle(.secondary)
-                Button(L("打开 PDF…")) { pickPDF() }
+    /// 另存为：有页面改动时先写临时文件作为导出基底，避免丢页操作
+    private func exportPDF() {
+        guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
+        var input = doc.url!
+        var tempURL: URL?
+        if doc.hasPageEdits, let d = doc.document {
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("export-base-\(UUID().uuidString).pdf")
+            if d.write(to: tmp) {
+                input = tmp
+                tempURL = tmp
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Button { pickPDF() } label: { Label(L("打开"), systemImage: "doc") }
-                    Button { saveInPlace() } label: { Label(L("保存"), systemImage: "arrow.down.doc") }
-                        .disabled(doc.document == nil)
-                    Button { exportPDF() } label: { Label(L("另存为"), systemImage: "square.and.arrow.down") }
-                        .disabled(doc.document == nil || (seals.selectedID == nil && !settings.watermark.isActive))
-                    Button {
-                        if doc.isDirty {
-                            showCloseConfirm = true
-                        } else {
-                            closeDoc()
-                        }
-                    } label: { Label(L("关闭"), systemImage: "xmark.circle") }
-                        .disabled(doc.document == nil)
-                    Spacer()
-                    Text("\(doc.displayName) · \(doc.pageCount) 页")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button { showJigsaw = true } label: { Label(L("拼合校验"), systemImage: "square.on.square") }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                Divider()
-                PreviewPagesView(statusText: statusText)
+        }
+        defer { if let t = tempURL { try? FileManager.default.removeItem(at: t) } }
+
+        let base = try? buildPlacements()
+        let wmParams = watermarkParams
+        let panel = NSSavePanel()
+        let stem = doc.url!.deletingPathExtension().lastPathComponent
+        panel.directoryURL = doc.url!.deletingLastPathComponent()   // 默认原文件所在文件夹
+        panel.nameFieldStringValue = "\(stem)-\(L10n.stampedSuffix).pdf"
+        panel.allowedContentTypes = [.pdf]
+        panel.beginSheetModal(for: NSApp.mainWindow!) { resp in
+            guard resp == .OK, let target = panel.url else { return }
+            do {
+                try PDFExporter.export(input: input, output: target,
+                                       placements: base?.placements ?? [], seals: base?.seals ?? [:],
+                                       watermark: wmParams?.config, watermarkPages: wmParams?.pages)
+                statusText = LF("已导出：%@", target.lastPathComponent)
+                doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
+            } catch {
+                errorText = error.localizedDescription
             }
         }
     }
@@ -218,28 +302,42 @@ struct ContentView: View {
         if pls.isEmpty { throw SealError.badSealImage }
         return (pls, sealImages)
     }
+}
 
-    private func exportPDF() {
-        guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
-        let base = try? buildPlacements()
-        let wmParams = watermarkParams
-        let panel = NSSavePanel()
-        let stem = doc.url!.deletingPathExtension().lastPathComponent
-        panel.directoryURL = doc.url!.deletingLastPathComponent()   // 默认原文件所在文件夹
-        panel.nameFieldStringValue = "\(stem)-\(L10n.stampedSuffix).pdf"
-        panel.allowedContentTypes = [.pdf]
-        panel.beginSheetModal(for: NSApp.mainWindow!) { resp in
-            guard resp == .OK, let target = panel.url else { return }
-            do {
-                try PDFExporter.export(input: doc.url!, output: target,
-                                       placements: base?.placements ?? [], seals: base?.seals ?? [:],
-                                       watermark: wmParams?.config, watermarkPages: wmParams?.pages)
-                statusText = LF("已导出：%@", target.lastPathComponent)
-                doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
-            } catch {
-                errorText = error.localizedDescription
+// MARK: - 盖章工作区（原有界面原样保留，仅去掉文件工具栏改由主入口壳承载）
+
+struct StampWorkspaceView: View {
+    let statusText: String?
+    @EnvironmentObject private var doc: DocumentStore
+    @EnvironmentObject private var seals: SealStore
+    @EnvironmentObject private var settings: StampSettings
+    @State private var showJigsaw = false
+    /// 印章库面板宽度（拖右侧边界调整，跨启动记忆）
+    @AppStorage("libraryWidth") private var libraryWidth: Double = 220
+
+    var body: some View {
+        HStack(spacing: 0) {
+            SealLibraryView()
+                .frame(width: libraryWidth)
+            LibraryWidthDivider(width: $libraryWidth)
+            VStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    Button { showJigsaw = true } label: { Label(L("拼合校验"), systemImage: "square.on.square") }
+                    Spacer()
+                    Text(L("拖动章落位；⌘点击多选；⌘Z 撤销"))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                Divider()
+                PreviewPagesView(statusText: statusText)
             }
+            Divider()
+            ParamsPanelView()
+                .frame(width: 268)
         }
+        .sheet(isPresented: $showJigsaw) { JigsawView() }
     }
 }
 

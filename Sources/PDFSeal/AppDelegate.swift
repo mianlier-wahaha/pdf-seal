@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let pending = pendingOpenURL {
             pendingOpenURL = nil
             doc.load(pending)
+            // 与 ContentView.openPDF 同口径：同步页数（pageCount=0 时所有「添加」被 guard 拦截）
+            // 并回置脏标记（syncPageCount 清空状态会经由订阅误触 isDirty）
+            settings.syncPageCount(doc.pageCount)
+            doc.isDirty = false
         }
         // 任何「文档内容」变更（骑缝章数组 / 正文章数组 / 水印配置）即标记未保存；
         // 选中状态(选章)等不改变文档内容的变动不触发，避免误报。
@@ -90,10 +94,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
 
-        // ⌘Z / Ctrl+Z：统一时间线撤销
+        // ⌘Z / Ctrl+Z：统一时间线撤销（先章操作，无章可撤则撤页面操作）；⇧⌘Z 重做页面操作
         if event.keyCode == 6, event.characters?.lowercased() == "z",
            event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
-            if settings?.undo() == true { return nil }
+            if event.modifierFlags.contains(.shift) {
+                if let doc = doc, doc.canRedoPageEdit, let st = settings {
+                    doc.redoPageEdit(settings: st)
+                    return nil
+                }
+            } else {
+                if settings?.undo() == true { return nil }
+                if let doc = doc, doc.canUndoPageEdit, let st = settings {
+                    doc.undoPageEdit(settings: st)
+                    return nil
+                }
+            }
         }
 
         // Delete（kVK_Delete = 51，即 Mac 删除/退格键）：移除选中的全部正文章（支持多选）。
@@ -142,11 +157,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 载入外部打开的 PDF；store 尚未绑定（冷启动竞态）时先挂起，bind 时补载
     func openDocument(at url: URL) {
-        if let doc = Self.docRef ?? doc {
+        if let doc = Self.docRef ?? doc, let settings = settings {
             doc.load(url)
+            // 与 ContentView.openPDF 同口径：漏了 syncPageCount 会导致外部打开后
+            // pageCount 停在 0，骑缝章/正文章的「添加」全被 guard pageCount > 0 拦死
+            settings.syncPageCount(doc.pageCount)
+            doc.isDirty = false
         } else {
             pendingOpenURL = url
         }
+    }
+
+    /// 关闭最后一个窗口时退出整个 app（与 ⌘Q 等效），避免窗口已关但 Dock 残留僵尸图标。
+    /// 未保存确认仍由 CloseGuard.windowShouldClose 先行拦截，确认关闭后走正常关闭→本方法触发退出。
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -165,12 +190,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 final class CloseGuard: NSObject, NSWindowDelegate {
     static let shared = CloseGuard()
     private weak var previous: NSObjectProtocol?
+    private var titleObserver: NSObjectProtocol?
 
-    /// 把本代理挂到窗口上（保留原 delegate 用于转发）
+    /// 把本代理挂到窗口上（保留原 delegate 用于转发），并钉住「窗口标题恒为空」——
+    /// SwiftUI 每次状态刷新都会把标题重设回 app 名，单靠 updateNSView 里设一次会被冲掉，
+    /// 故监听 didChangeTitle：一旦非空立即清空（清空为空串不再触发通知，循环自然终止）。
     func attach(to window: NSWindow) {
-        if window.delegate === self { return }
-        previous = window.delegate
-        window.delegate = self
+        if window.delegate === self {
+            // delegate 已挂，仅确保标题为空
+        } else {
+            previous = window.delegate
+            window.delegate = self
+        }
+        if titleObserver == nil {
+            titleObserver = NotificationCenter.default.addObserver(
+                forName: Notification.Name("NSWindowDidChangeTitle"), object: window, queue: .main
+            ) { [weak window] _ in
+                guard let window, !window.title.isEmpty else { return }
+                window.titleVisibility = .hidden
+                window.title = ""
+            }
+        }
+        if !window.title.isEmpty {
+            window.titleVisibility = .hidden
+            window.title = ""
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -204,7 +248,11 @@ struct WindowAccessor: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         // 本方法非 actor 隔离，但 SwiftUI 保证在主线程调用；切换窗口 delegate 需 @MainActor
         MainActor.assumeIsolated {
-            if let win = nsView.window { CloseGuard.shared.attach(to: win) }
+            if let win = nsView.window {
+                CloseGuard.shared.attach(to: win)
+                win.title = ""
+                win.titleVisibility = .hidden   // 顶栏左侧不留标题文字
+            }
         }
     }
 }

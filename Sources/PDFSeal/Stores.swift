@@ -11,8 +11,87 @@ final class DocumentStore: ObservableObject {
     @Published var url: URL?
     @Published var pageSizes: [CGSize] = []
     @Published var loadError: String?
-    /// 当前文档是否有未保存的改动（盖章/水印编辑后置 true；保存或打开/关闭文件后置 false）
+    /// 当前文档是否有未保存的改动（盖章/水印/页面编辑后置 true；保存或打开/关闭文件后置 false）
     @Published var isDirty: Bool = false
+    /// 是否有未落盘的「页面结构」改动（增删/排序/旋转/度量）——保存时需先写基础文档
+    @Published var hasPageEdits: Bool = false
+    /// 页面行标识（页面管理 List 的稳定行 id，页操作后整体重建）
+    @Published var pageIDs: [UUID] = []
+    /// 页操作版本号（缩略图缓存失效用）
+    @Published var revision: Int = 0
+    /// 跨界面跳页请求（页面管理双击某页 → 预览定位到该页），消费后置 nil
+    @Published var pendingJumpPage: Int? = nil
+
+    // MARK: 页面操作撤销/重做（快照式：PDFDocument 深拷贝 + 行 ID + 章页码状态）
+    @Published private(set) var canUndoPageEdit = false
+    @Published private(set) var canRedoPageEdit = false
+    private var pageUndoStack: [PageEditSnapshot] = []
+    private var pageRedoStack: [PageEditSnapshot] = []
+    private let maxPageUndoDepth = 30
+
+    private func takePageSnapshotDoc() -> PDFDocument? {
+        guard let d = document else { return nil }
+        let snap = PDFDocument()
+        for i in 0..<d.pageCount {
+            if let p = d.page(at: i) { snap.insert(p.copy() as! PDFPage, at: i) }
+        }
+        return snap
+    }
+
+    /// 每次页面结构改动前调用（删除/旋转/排序/插入/度量）
+    func pushPageUndo(stampState: StampPageState) {
+        guard let snapDoc = takePageSnapshotDoc() else { return }
+        pageUndoStack.append(PageEditSnapshot(document: snapDoc, pageIDs: pageIDs,
+                                              hasPageEdits: hasPageEdits, stampState: stampState))
+        if pageUndoStack.count > maxPageUndoDepth { pageUndoStack.removeFirst() }
+        pageRedoStack.removeAll()
+        refreshPageUndoFlags()
+    }
+
+    func undoPageEdit(settings: StampSettings) {
+        guard let snap = pageUndoStack.popLast() else { return }
+        if let cur = takePageSnapshotDoc() {
+            pageRedoStack.append(PageEditSnapshot(document: cur, pageIDs: pageIDs,
+                                                  hasPageEdits: hasPageEdits,
+                                                  stampState: settings.capturePageState()))
+        }
+        restorePageEdit(snap, settings: settings)
+    }
+
+    func redoPageEdit(settings: StampSettings) {
+        guard let snap = pageRedoStack.popLast() else { return }
+        if let cur = takePageSnapshotDoc() {
+            pageUndoStack.append(PageEditSnapshot(document: cur, pageIDs: pageIDs,
+                                                  hasPageEdits: hasPageEdits,
+                                                  stampState: settings.capturePageState()))
+        }
+        restorePageEdit(snap, settings: settings)
+    }
+
+    private func restorePageEdit(_ snap: PageEditSnapshot, settings: StampSettings) {
+        document = snap.document
+        pageSizes = (0..<snap.document.pageCount).map {
+            guard let p = snap.document.page(at: $0) else { return .zero }
+            return PageBox.displayedSize(p)
+        }
+        pageIDs = snap.pageIDs
+        hasPageEdits = snap.hasPageEdits
+        isDirty = true
+        revision += 1
+        settings.restorePageState(snap.stampState)
+        refreshPageUndoFlags()
+    }
+
+    func clearPageUndoHistory() {
+        pageUndoStack.removeAll()
+        pageRedoStack.removeAll()
+        refreshPageUndoFlags()
+    }
+
+    private func refreshPageUndoFlags() {
+        canUndoPageEdit = !pageUndoStack.isEmpty
+        canRedoPageEdit = !pageRedoStack.isEmpty
+    }
 
     var displayName: String { url?.lastPathComponent ?? "未打开文件" }
     var pageCount: Int { pageSizes.count }
@@ -31,7 +110,10 @@ final class DocumentStore: ObservableObject {
             return PageBox.displayedSize(p)
         }
         loadError = nil
+        pageIDs = (0..<d.pageCount).map { _ in UUID() }
+        hasPageEdits = false
         isDirty = false
+        clearPageUndoHistory()
     }
 
     /// 关闭当前文档
@@ -40,7 +122,10 @@ final class DocumentStore: ObservableObject {
         url = nil
         pageSizes = []
         loadError = nil
+        pageIDs = []
+        hasPageEdits = false
         isDirty = false
+        clearPageUndoHistory()
     }
 }
 
@@ -416,6 +501,62 @@ final class StampSettings: ObservableObject {
         undoActions = []
     }
 
+    /// 页面管理操作后同步页数（不清空章实例，与 syncPageCount 不同）
+    func setPageCount(_ n: Int) { pageCount = max(n, 0) }
+
+    // MARK: 页面操作撤销用的章参数快照
+    func capturePageState() -> StampPageState {
+        StampPageState(qifengStamps: qifengStamps, fullStamps: fullStamps, watermark: watermark)
+    }
+
+    func restorePageState(_ st: StampPageState) {
+        qifengStamps = st.qifengStamps
+        fullStamps = st.fullStamps
+        watermark = st.watermark
+    }
+
+    /// 页操作后的章页码范围联动收缩/顺延。
+    /// oldToNew[旧下标] = 新下标（nil = 该页已删除）。旋转/度量等不换序的操作传 nil 直接跳过。
+    func remapPages(_ oldToNew: [Int?]?) {
+        guard let map = oldToNew, !map.isEmpty else { return }
+        let total = map.count
+        func mapBound(_ oneBased: Int, seekUp: Bool) -> Int? {
+            let z = oneBased - 1
+            guard (0..<total).contains(z) else { return nil }
+            if let n = map[z] { return n + 1 }
+            if seekUp {
+                if let n = (z..<total).compactMap({ map[$0] }).first { return n + 1 }
+            } else {
+                if let n = (0...z).compactMap({ map[$0] }).last { return n + 1 }
+            }
+            return nil
+        }
+        func remapRange(_ all: Bool, _ s: inout Int, _ e: inout Int) {
+            guard !all else { return }
+            if let ns = mapBound(s, seekUp: false) { s = ns }
+            if let ne = mapBound(e, seekUp: true) { e = ne }
+            if s > e { e = s }
+        }
+        for i in qifengStamps.indices {
+            var s = qifengStamps[i].rangeStart, e = qifengStamps[i].rangeEnd
+            remapRange(qifengStamps[i].allPages, &s, &e)
+            qifengStamps[i].rangeStart = s
+            qifengStamps[i].rangeEnd = e
+            qifengStamps[i].removedPages = Set(qifengStamps[i].removedPages.compactMap { map[$0] })
+        }
+        for i in fullStamps.indices {
+            var s = fullStamps[i].rangeStart, e = fullStamps[i].rangeEnd
+            remapRange(fullStamps[i].allPages, &s, &e)
+            fullStamps[i].rangeStart = s
+            fullStamps[i].rangeEnd = e
+            fullStamps[i].removedPages = Set(fullStamps[i].removedPages.compactMap { map[$0] })
+        }
+        var ws = watermark.rangeStart, we = watermark.rangeEnd
+        remapRange(watermark.allPages, &ws, &we)
+        watermark.rangeStart = ws
+        watermark.rangeEnd = we
+    }
+
     func syncPageCount(_ count: Int) {
         guard count > 0 else { return }
         pageCount = count
@@ -674,4 +815,22 @@ final class StampSettings: ObservableObject {
         c.middleRatio = CGFloat(qifengMiddleRatio)
         return c
     }
+}
+
+
+// MARK: - 页面操作撤销快照
+
+/// 页面操作撤销快照：文档深拷贝 + 行 ID + 章页码状态
+struct PageEditSnapshot {
+    let document: PDFDocument
+    let pageIDs: [UUID]
+    let hasPageEdits: Bool
+    let stampState: StampPageState
+}
+
+/// 章参数状态快照（页操作会联动章页码范围/removedPages）
+struct StampPageState {
+    var qifengStamps: [QifengInstance]
+    var fullStamps: [FullStampInstance]
+    var watermark: WatermarkSettings
 }
