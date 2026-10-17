@@ -8,11 +8,14 @@ import SealCore
 struct PreviewMainView: View {
     @EnvironmentObject private var doc: DocumentStore
     @State private var sidebar: Int = 0          // 0 缩略图 1 标签 2 大纲
-    @State private var thumbs: [Int: NSImage] = [:]
+    /// 全局共享缩略图缓存（按文档身份隔离 + 后台预取）：切标签回来零重渲染
+    @ObservedObject private var thumbStore = ThumbStore.shared
     @State private var currentPage: Int = 0
     @State private var revisionForCache: Int = -1
     @State private var sidebarWidth: CGFloat = 216   // 左栏宽度，可拖动调整
     @State private var dragStartWidth: CGFloat? = nil
+    @State private var editingPage = false           // 当前页数字点击后进入输入跳页
+    @State private var pageInput = ""
     private let controller = PDFPageController()
 
     var body: some View {
@@ -35,20 +38,27 @@ struct PreviewMainView: View {
             }
             .frame(width: sidebarWidth)
             // 可拖动分隔条：拖动调整左栏宽度；缩略图列数随宽度自适应（宽→2列，窄→1列）
+            // 关键：用全局坐标计算位移——视图自身随宽度移动，若用本地坐标会形成
+            // 「移动→坐标漂移→再移动」的反馈回路，表现为果冻般弹性 + 抽搐
             Rectangle()
                 .fill(Color.clear)
                 .frame(width: 6)
                 .contentShape(Rectangle())
                 .onHover { hovering in
-                    if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    NSCursor.resizeLeftRight.set()
+                    if !hovering { NSCursor.arrow.set() }
                 }
                 .gesture(
-                    DragGesture(minimumDistance: 1)
+                    DragGesture(minimumDistance: 1, coordinateSpace: .global)
                         .onChanged { v in
                             if dragStartWidth == nil { dragStartWidth = sidebarWidth }
-                            sidebarWidth = min(max((dragStartWidth ?? 216) + v.translation.width, 160), 460)
+                            let dx = v.location.x - v.startLocation.x   // 全局差值，与分隔条自身移动无关
+                            sidebarWidth = min(max((dragStartWidth ?? 216) + dx, 160), 460)
                         }
-                        .onEnded { _ in dragStartWidth = nil }
+                        .onEnded { _ in
+                            dragStartWidth = nil
+                            NSCursor.arrow.set()
+                        }
                 )
             VStack(spacing: 0) {
                 PDFPageView(controller: controller) { page in
@@ -62,9 +72,14 @@ struct PreviewMainView: View {
             }
         }
         .onChange(of: doc.revision) { _ in
-            thumbs.removeAll()   // 页操作后缩略图整体失效
+            thumbStore.invalidate(document: doc.document)   // 页操作后整本失效重渲染
+        }
+        .onChange(of: doc.url) { _ in
+            // 切换会话（换文档）：新文档载入即预取；旧文档缓存保留（切回即用）
+            thumbStore.prefetch(document: doc.document, width: 170)
         }
         .onAppear {
+            thumbStore.prefetch(document: doc.document, width: 170)
             // 页面管理双击某页跳转过来：定位到该页（异步等 PDFView 就绪）
             if let p = doc.pendingJumpPage {
                 doc.pendingJumpPage = nil
@@ -80,36 +95,47 @@ struct PreviewMainView: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 88), spacing: 10)], spacing: 10) {
                 ForEach(0..<doc.pageCount, id: \.self) { i in
                     VStack(spacing: 4) {
-                        Image(nsImage: thumb(at: i))
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxHeight: 110)
-                            .overlay(
+                        Group {
+                            if let d = doc.document,
+                               let img = thumbStore.image(for: ObjectIdentifier(d), page: i) {
+                                Image(nsImage: img)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(maxHeight: 110)
+                            } else {
+                                // 占位：按真实页型比例留位，后台渲染完成后自动替换
+                                let asp = doc.pageSizes.indices.contains(i)
+                                    ? max(doc.pageSizes[i].width / max(doc.pageSizes[i].height, 1), 0.3)
+                                    : 0.707
                                 RoundedRectangle(cornerRadius: 4)
-                                    .stroke(i == currentPage ? Color.accentColor : Color(nsColor: .separatorColor),
-                                            lineWidth: i == currentPage ? 2 : 0.5)
-                            )
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .aspectRatio(asp, contentMode: .fit)
+                                    .frame(maxHeight: 110)
+                                    .overlay(ProgressView().controlSize(.mini))
+                            }
+                        }
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(i == currentPage ? Color.accentColor : Color(nsColor: .separatorColor),
+                                        lineWidth: i == currentPage ? 2 : 0.5)
+                        )
                         Text("\(i + 1)")
                             .font(.caption2)
                             .foregroundStyle(i == currentPage ? Color.accentColor : .secondary)
                     }
                     .contentShape(Rectangle())
                     .onTapGesture { controller.goto(i) }
+                    .onAppear { requestThumb(i) }
                 }
             }
             .padding(10)
         }
     }
 
-    private func thumb(at index: Int) -> NSImage {
-        if let t = thumbs[index] { return t }
-        guard let p = doc.document?.page(at: index) else { return NSImage() }
-        let size = PageBox.displayedSize(p)
-        let scale = 170.0 / max(size.width, 1)
-        let img = p.thumbnail(of: CGSize(width: 170, height: max(size.height * scale, 40)),
-                              for: .mediaBox)
-        thumbs[index] = img
-        return img
+    /// 请求某页缩略图：命中全局缓存即时返回；未命中由 ThumbStore 后台渲染（防重复提交）
+    private func requestThumb(_ index: Int) {
+        guard let d = doc.document else { return }
+        thumbStore.request(document: d, page: index, width: 170)
     }
 
     // MARK: 标签 / 大纲（均来自 PDFOutline：标签=一级平铺，大纲=整树缩进）
@@ -173,13 +199,41 @@ struct PreviewMainView: View {
             Spacer()
             Button { controller.step(-1) } label: { Image(systemName: "chevron.left") }
                 .disabled(currentPage <= 0)
-            Text(LF("第 %d / %d 页", currentPage + 1, doc.pageCount))
+            if editingPage {
+                TextField(L("页"), text: $pageInput, onCommit: { commitJump() })
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 56)
+                    .multilineTextAlignment(.center)
+                    .onExitCommand { editingPage = false }   // Esc 取消
+                    .font(.callout.monospacedDigit())
+            } else {
+                HStack(spacing: 3) {
+                    Text(L("第"))
+                    Text("\(currentPage + 1)")
+                        .foregroundStyle(Color.accentColor)
+                        .underline()
+                        .onTapGesture {
+                            pageInput = "\(currentPage + 1)"
+                            editingPage = true
+                        }
+                        .help(L("点击输入页码跳转"))
+                    Text(LF("/ %d 页", doc.pageCount))
+                }
                 .font(.callout)
                 .monospacedDigit()
+            }
             Button { controller.step(1) } label: { Image(systemName: "chevron.right") }
                 .disabled(currentPage >= doc.pageCount - 1)
             Spacer()
         }
+    }
+
+    /// 输入页码跳转：越界自动钳制，非法输入忽略
+    private func commitJump() {
+        editingPage = false
+        guard let n = Int(pageInput.trimmingCharacters(in: .whitespaces)), n >= 1 else { return }
+        let target = min(n, doc.pageCount)
+        controller.goto(target - 1)
     }
 }
 

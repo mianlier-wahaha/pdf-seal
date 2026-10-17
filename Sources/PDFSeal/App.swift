@@ -5,19 +5,21 @@ import SealCore
 @main
 struct PDFSealApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var doc = DocumentStore()
+    @StateObject private var workspace = Workspace()
     @StateObject private var seals = SealStore()
-    @StateObject private var settings = StampSettings()
 
     var body: some Scene {
         // 全局键盘监听随 App 生命周期安装（AppDelegate 内幂等，不再依赖视图 onAppear/onDisappear）
-        appDelegate.bind(doc: doc, seals: seals, settings: settings)
+        appDelegate.bind(workspace: workspace, seals: seals)
         // 窗口标题不显示（顶栏左侧留给功能块），app 名仍取自 CFBundleName
+        // 多标签：注入「活动会话」的 doc/settings，切标签时由 body 重算完成切换
         return WindowGroup {
+            let s = workspace.sessions[workspace.activeIndex]
             ContentView()
-                .environmentObject(doc)
+                .environmentObject(s.doc)
                 .environmentObject(seals)
-                .environmentObject(settings)
+                .environmentObject(s.settings)
+                .environmentObject(workspace)
                 .frame(minWidth: 1180, minHeight: 760)
         }
         .windowToolbarStyle(.unifiedCompact)   // 紧凑顶栏：压缩垂直占用

@@ -16,6 +16,7 @@ struct ContentView: View {
     @EnvironmentObject private var doc: DocumentStore
     @EnvironmentObject private var seals: SealStore
     @EnvironmentObject private var settings: StampSettings
+    @EnvironmentObject private var workspace: Workspace
 
     @State private var entry: MainEntry = .preview
     @State private var statusText: String?
@@ -23,6 +24,11 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // 空白会话不算标签：一个 PDF 都没打开时，整个标签栏（含分隔线）都不显示
+            if hasOpenTabs {
+                tabBar
+                Divider()
+            }
             mainContent
             Divider()
             statusBar
@@ -42,6 +48,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .menuOpenPDF)) { _ in pickPDF() }
         .onReceive(NotificationCenter.default.publisher(for: .menuSavePDF)) { _ in if doc.document != nil { saveInPlace() } }
         .onReceive(NotificationCenter.default.publisher(for: .menuSaveAsPDF)) { _ in if doc.document != nil { exportPDF() } }
+        .onChange(of: workspace.active.id) { _ in
+            statusText = nil   // 切换标签：状态栏提示属于上一个会话，不保留
+        }
         .onAppear {
             let d = seals.physicalSize(for: seals.selectedID)
             settings.applySealPhysicalSize(widthCm: d.widthCm, heightCm: d.heightCm,
@@ -81,8 +90,91 @@ struct ContentView: View {
                 Button { exportPDF() } label: { toolLabel("square.and.arrow.down", L("另存为")) }
                     .disabled(doc.document == nil)
                     .help(L("另存为新文件（⇧⌘S）"))
+                Button { printPDF() } label: { toolLabel("printer", L("打印")) }
+                    .disabled(doc.document == nil)
+                    .keyboardShortcut("p", modifiers: .command)
+                    .help(L("打印当前 PDF（⌘P）"))
+            }
+            ToolbarItem(placement: .primaryAction) {
+                // 顶栏最右：关闭（走窗口关闭流程，未保存先确认）
+                Button { NSApp.keyWindow?.performClose(nil) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .help(L("关闭窗口（⌘W）"))
             }
         }
+    }
+
+    // MARK: 标签栏（独立于工具栏的一行；只显示已打开 PDF 的标签，空白会话不算标签）
+
+    @State private var draggingTabID: UUID?
+
+    /// 仅有文档的会话才算标签；空白起始会话不显示
+    private var openTabs: [Session] {
+        workspace.sessions.filter { $0.doc.document != nil }
+    }
+    private var hasOpenTabs: Bool { !openTabs.isEmpty }
+
+    /// 标签按实际内容长度显示；所有标签总宽超过整行时才被压缩、超宽出省略号
+    /// （HStack 空间不足时自动压缩 Text，末尾 Spacer 吸收空闲宽度）。
+    /// 右键菜单（关闭标签）在此布局下可正常弹出。
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ForEach(openTabs, id: \.id) { s in
+                sessionTab(s)
+            }
+            Spacer(minLength: 0)   // 标签未占满时吸收剩余宽度，标签保持实际长度
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+
+    private func sessionTab(_ s: Session) -> some View {
+        let isActive = s.id == workspace.active.id
+        return HStack(spacing: 4) {
+            Text(s.title)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .font(.system(size: 11))
+                .foregroundStyle(isActive ? Color.primary : Color.secondary)
+            Button {
+                workspace.close(s.id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Color.secondary.opacity(isActive ? 1 : 0.5))
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help(L("关闭此标签"))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isActive ? Color.accentColor.opacity(0.18) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(isActive ? Color.accentColor.opacity(0.6) : Color(nsColor: .separatorColor),
+                        lineWidth: isActive ? 1 : 0.5)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let i = workspace.sessions.firstIndex(where: { $0.id == s.id }) {
+                workspace.activeIndex = i
+            }
+        }
+        .contextMenu {
+            Button(L("关闭标签")) { workspace.close(s.id) }
+        }
+        .onDrag {
+            draggingTabID = s.id
+            return NSItemProvider(object: s.id.uuidString as NSString)
+        }
+        .onDrop(of: [.text], delegate: TabDropDelegate(target: s.id, workspace: workspace,
+                                                       draggingTabID: $draggingTabID))
     }
 
 
@@ -108,11 +200,17 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            switch entry {
-            case .preview: PreviewMainView()
-            case .stamp: StampWorkspaceView(statusText: statusText)
-            case .pageManage: PageManageView(onOpenPage: openInPreview)
+            Group {
+                switch entry {
+                case .preview: PreviewMainView()
+                case .stamp: StampWorkspaceView(statusText: statusText)
+                case .pageManage: PageManageView(onOpenPage: openInPreview)
+                }
             }
+            // 关键：视图身份绑定当前会话——切换标签时整个视图树重建，
+            // 页面管理/预览的缩略图缓存、选中集等 @State 随会话隔离，
+            // 否则新标签沿用旧文档的缩略图（索引键相同、缓存不失效）。
+            .id(workspace.active.id)
         }
     }
 
@@ -139,12 +237,8 @@ struct ContentView: View {
     // MARK: 文件操作
 
     private func openPDF(_ url: URL) {
-        let scoped = url.startAccessingSecurityScopedResource()
-        doc.load(url)
-        if scoped { url.stopAccessingSecurityScopedResource() }
-        settings.syncPageCount(doc.pageCount)
-        doc.isDirty = false   // 刚打开文件，尚无未保存改动（syncPageCount 的清空会触发脏标记，这里回置）
-        statusText = doc.url == nil ? nil : LF("已载入 %d 页", doc.pageCount)
+        let s = workspace.openURL(url)
+        statusText = s.doc.url == nil ? nil : LF("已载入 %d 页", s.doc.pageCount)
     }
 
     /// NSOpenPanel 直调：SwiftUI fileImporter 在部分视图层级下不弹窗
@@ -211,30 +305,58 @@ struct ContentView: View {
         }
     }
 
-    /// 另存为：有页面改动时先写临时文件作为导出基底，避免丢页操作
+    /// 另存为：有页面改动时先写临时文件作为导出基底，避免丢页操作。
+    /// 时序关键：临时文件的写入与清理都放在面板回调内——
+    /// ① beginSheetModal 是异步的，若在挂面板前写临时文件，大文档会卡住弹窗出现；
+    /// ② defer 清理会随函数返回立刻执行，等用户点「保存」时文件已被删，
+    ///    PDFExporter 打不开输入即报「无法打开输入 PDF（可能已加密或损坏）」。
     private func exportPDF() {
-        guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
-        var input = doc.url!
-        var tempURL: URL?
-        if doc.hasPageEdits, let d = doc.document {
-            let tmp = FileManager.default.temporaryDirectory
-                .appendingPathComponent("export-base-\(UUID().uuidString).pdf")
-            if d.write(to: tmp) {
-                input = tmp
-                tempURL = tmp
-            }
-        }
-        defer { if let t = tempURL { try? FileManager.default.removeItem(at: t) } }
-
+        guard let srcURL = doc.url else { errorText = L("请先打开 PDF"); return }
         let base = try? buildPlacements()
         let wmParams = watermarkParams
         let panel = NSSavePanel()
-        let stem = doc.url!.deletingPathExtension().lastPathComponent
-        panel.directoryURL = doc.url!.deletingLastPathComponent()   // 默认原文件所在文件夹
+        let stem = srcURL.deletingPathExtension().lastPathComponent
+        panel.directoryURL = srcURL.deletingLastPathComponent()   // 默认原文件所在文件夹
         panel.nameFieldStringValue = "\(stem)-\(L10n.stampedSuffix).pdf"
         panel.allowedContentTypes = [.pdf]
         panel.beginSheetModal(for: NSApp.mainWindow!) { resp in
             guard resp == .OK, let target = panel.url else { return }
+            // 快路径：无章无水印时纯另存——跳过临时基底与逐页压平（实测 228 页/108MB
+            // 压平要 4s），有页改动直写目标、无改动字节复制，只剩一次必需的写盘
+            let hasOverlays = !(base?.placements.isEmpty ?? true) || wmParams != nil
+            if !hasOverlays {
+                do {
+                    if FileManager.default.fileExists(atPath: target.path) {
+                        try FileManager.default.removeItem(at: target)   // 面板已确认覆盖
+                    }
+                    if doc.hasPageEdits, let d = doc.document {
+                        guard d.write(to: target) else {
+                            errorText = L("写入失败，请检查目标位置是否可写"); return
+                        }
+                    } else {
+                        try FileManager.default.copyItem(at: srcURL, to: target)
+                    }
+                    statusText = LF("已导出：%@", target.lastPathComponent)
+                    doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
+                } catch {
+                    errorText = error.localizedDescription
+                }
+                return
+            }
+
+            // 盖章/水印路径：先把内存文档（含未保存页操作）落临时基底，再压平导出
+            var input = srcURL
+            var tempURL: URL?
+            if doc.hasPageEdits, let d = doc.document {
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("export-base-\(UUID().uuidString).pdf")
+                if d.write(to: tmp) {
+                    input = tmp
+                    tempURL = tmp
+                }
+            }
+            defer { if let t = tempURL { try? FileManager.default.removeItem(at: t) } }
+
             do {
                 try PDFExporter.export(input: input, output: target,
                                        placements: base?.placements ?? [], seals: base?.seals ?? [:],
@@ -245,6 +367,25 @@ struct ContentView: View {
                 errorText = error.localizedDescription
             }
         }
+    }
+
+    // MARK: 打印
+
+    /// 系统打印：用离屏 PDFView 承载文档，交给 NSPrintOperation 走系统打印面板
+    private func printPDF() {
+        guard let d = doc.document, let win = appContentWindow() ?? NSApp.mainWindow else { return }
+        let pv = PDFView()
+        pv.document = d.copy() as? PDFDocument   // 用副本打印，避免打印过程触碰原文档
+        pv.autoScales = true
+        pv.frame = NSRect(x: 0, y: 0, width: 612, height: 792)
+        let info = NSPrintInfo()
+        info.horizontalPagination = .fit
+        info.verticalPagination = .automatic
+        info.isHorizontallyCentered = true
+        info.isVerticallyCentered = false
+        let op = NSPrintOperation(view: pv, printInfo: info)
+        op.showsPrintPanel = true
+        op.runModal(for: win, delegate: nil, didRun: nil, contextInfo: nil)
     }
 
     // MARK: 盖章导出
@@ -301,6 +442,36 @@ struct ContentView: View {
 
         if pls.isEmpty { throw SealError.badSealImage }
         return (pls, sealImages)
+    }
+}
+
+// MARK: - 标签拖拽排序
+
+private struct TabDropDelegate: DropDelegate {
+    let target: UUID
+    let workspace: Workspace
+    @Binding var draggingTabID: UUID?
+
+    func validateDrop(info: DropInfo) -> Bool { draggingTabID != nil }
+
+    func dropEntered(info: DropInfo) {
+        guard let dragging = draggingTabID, dragging != target,
+              let from = workspace.sessions.firstIndex(where: { $0.id == dragging }),
+              let to = workspace.sessions.firstIndex(where: { $0.id == target }) else { return }
+        let activeID = workspace.active.id
+        workspace.sessions.move(fromOffsets: IndexSet(integer: from),
+                                toOffset: to > from ? to + 1 : to)
+        // 换位后保持「活动标签」仍指向同一会话
+        if let ni = workspace.sessions.firstIndex(where: { $0.id == activeID }) {
+            workspace.activeIndex = ni
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingTabID = nil
+        return true
     }
 }
 
@@ -373,13 +544,14 @@ private struct LibraryWidthDivider: View {
             }
         }
         .gesture(
-            DragGesture(minimumDistance: 0)
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { d in
                     if !dragging {
                         dragging = true
-                        startWidth = width   // 记手势起点宽度，避免 translation 累积漂移
+                        startWidth = width   // 记手势起点宽度
                     }
-                    width = min(max(startWidth + Double(d.translation.width), 150), 420)
+                    let dx = d.location.x - d.startLocation.x   // 全局差值，与分隔条自身移动无关
+                    width = min(max(startWidth + Double(dx), 150), 420)
                 }
                 .onEnded { _ in
                     dragging = false

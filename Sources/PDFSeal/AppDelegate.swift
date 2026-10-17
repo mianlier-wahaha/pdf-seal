@@ -10,63 +10,44 @@ import Combine
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyMonitor: Any?
     private var flagsMonitor: Any?
-    private weak var doc: DocumentStore?
+    private weak var workspace: Workspace?
     private weak var seals: SealStore?
-    private weak var settings: StampSettings?
-    /// 脏标记订阅持有（避免被回收）
-    private var cancellables: [AnyCancellable] = []
-    /// bind 仅执行一次的幂等守卫（App.body 每次重算都会调到，不能重复订阅）
-    private var didBind = false
-    /// 供窗口关闭代理读取当前文档（避免循环依赖）
-    static var docRef: DocumentStore?
+    /// 供窗口关闭代理读取活动会话文档（避免循环依赖）
+    static var workspaceRef: Workspace?
     /// 冷启动竞态缓冲：odoc 事件先于 bind 到达时暂存待打开的 PDF
     private var pendingOpenURL: URL?
 
     /// 由 PDFSealApp 在 body 中调用，但内部幂等（仅首次真正订阅）。
-    /// ⚠️ 曾在 body 中裸调导致死循环：每次 body 重算都新建 sink，Combine 订阅即重放当前值
-    /// 把 isDirty 置 true → 视图失效 → 再重算 body → 再建 sink…，无限重绘 + 订阅集合膨胀。
-    /// 故用 didBind 守卫只订阅一次，并用 dropFirst() 跳过订阅时的初始重放（避免启动即误报未保存）。
-    func bind(doc: DocumentStore, seals: SealStore, settings: StampSettings) {
-        guard !didBind else { return }
-        didBind = true
-        self.doc = doc
+    func bind(workspace: Workspace, seals: SealStore) {
+        guard self.workspace == nil else { return }
+        self.workspace = workspace
         self.seals = seals
-        self.settings = settings
-        AppDelegate.docRef = doc
+        Self.workspaceRef = workspace
         installIfNeeded()
         // 冷启动时 odoc 事件可能先于 bind 到达：补载暂存的 PDF
         if let pending = pendingOpenURL {
             pendingOpenURL = nil
-            doc.load(pending)
-            // 与 ContentView.openPDF 同口径：同步页数（pageCount=0 时所有「添加」被 guard 拦截）
-            // 并回置脏标记（syncPageCount 清空状态会经由订阅误触 isDirty）
-            settings.syncPageCount(doc.pageCount)
-            doc.isDirty = false
+            workspace.openURL(pending)
         }
-        // 任何「文档内容」变更（骑缝章数组 / 正文章数组 / 水印配置）即标记未保存；
-        // 选中状态(选章)等不改变文档内容的变动不触发，避免误报。
-        // dropFirst() 跳过订阅瞬间对当前值的重放，否则会把 isDirty 从 false 误置 true。
-        settings.$qifengStamps.dropFirst().sink { [weak doc] _ in doc?.isDirty = true }.store(in: &cancellables)
-        settings.$fullStamps.dropFirst().sink { [weak doc] _ in doc?.isDirty = true }.store(in: &cancellables)
-        settings.$watermark.dropFirst().sink { [weak doc] _ in doc?.isDirty = true }.store(in: &cancellables)
     }
 
     private func installIfNeeded() {
-        // 监听器必须同时具备 store 引用且尚未安装，才安装一次；重复调用为无操作。
+        // 监听器必须同时具备 workspace 引用且尚未安装，才安装一次；重复调用为无操作。
         guard keyMonitor == nil, flagsMonitor == nil,
-              seals != nil, settings != nil else { return }
+              seals != nil, workspace != nil else { return }
 
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             return self.handle(keyDown: event)
         }
         flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            self?.settings?.commandKeyDown = event.modifierFlags.contains(.command)
+            self?.workspace?.active.settings.commandKeyDown = event.modifierFlags.contains(.command)
             return event
         }
     }
 
     /// 全局键盘：Esc 取消选中章；⌘Z / Ctrl+Z 撤销；Delete 移除选中章；↑/↓ 调整印章库顺序
+    /// （章/文档操作均落在「活动会话」上，多标签切换后自动跟随）
     private func handle(keyDown event: NSEvent) -> NSEvent? {
         // 仅当文本框正在编辑（字段编辑器激活）且本次是「输入字符」时，放行给系统处理文本；
         // 避免抢走正常打字，但我们的全局快捷键（Esc/Delete/⌘Z/方向键）不在字符输入范畴，
@@ -87,8 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Esc：取消全部选中章
         if event.keyCode == 53 || event.characters == "\u{1b}" {
-            if let settings = settings, !settings.selectedFullStampIDs.isEmpty {
-                settings.clearSelection()
+            if let st = workspace?.active.settings, !st.selectedFullStampIDs.isEmpty {
+                st.clearSelection()
                 return nil
             }
             return event
@@ -97,15 +78,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ⌘Z / Ctrl+Z：统一时间线撤销（先章操作，无章可撤则撤页面操作）；⇧⌘Z 重做页面操作
         if event.keyCode == 6, event.characters?.lowercased() == "z",
            event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
+            guard let ws = workspace else { return event }
+            let st = ws.active.settings
             if event.modifierFlags.contains(.shift) {
-                if let doc = doc, doc.canRedoPageEdit, let st = settings {
-                    doc.redoPageEdit(settings: st)
+                if ws.active.doc.canRedoPageEdit {
+                    ws.active.doc.redoPageEdit(settings: st)
                     return nil
                 }
             } else {
-                if settings?.undo() == true { return nil }
-                if let doc = doc, doc.canUndoPageEdit, let st = settings {
-                    doc.undoPageEdit(settings: st)
+                if st.undo() == true { return nil }
+                if ws.active.doc.canUndoPageEdit {
+                    ws.active.doc.undoPageEdit(settings: st)
                     return nil
                 }
             }
@@ -116,8 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if event.keyCode == 51,
            !event.modifierFlags.contains(.command),
            !event.modifierFlags.contains(.option),
-           let settings = settings, !settings.selectedFullStampIDs.isEmpty {
-            settings.removeSelectedFullStamps()
+           let ws = workspace, !ws.active.settings.selectedFullStampIDs.isEmpty {
+            ws.active.settings.removeSelectedFullStamps()
             return nil
         }
 
@@ -155,14 +138,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 载入外部打开的 PDF；store 尚未绑定（冷启动竞态）时先挂起，bind 时补载
+    /// 载入外部打开的 PDF（新标签或切换到已开标签）；workspace 尚未绑定（冷启动竞态）时先挂起
     func openDocument(at url: URL) {
-        if let doc = Self.docRef ?? doc, let settings = settings {
-            doc.load(url)
-            // 与 ContentView.openPDF 同口径：漏了 syncPageCount 会导致外部打开后
-            // pageCount 停在 0，骑缝章/正文章的「添加」全被 guard pageCount > 0 拦死
-            settings.syncPageCount(doc.pageCount)
-            doc.isDirty = false
+        if let ws = workspace {
+            ws.openURL(url)
         } else {
             pendingOpenURL = url
         }
@@ -193,32 +172,33 @@ final class CloseGuard: NSObject, NSWindowDelegate {
     private var titleObserver: NSObjectProtocol?
 
     /// 把本代理挂到窗口上（保留原 delegate 用于转发），并钉住「窗口标题恒为空」——
-    /// SwiftUI 每次状态刷新都会把标题重设回 app 名，单靠 updateNSView 里设一次会被冲掉，
-    /// 故监听 didChangeTitle：一旦非空立即清空（清空为空串不再触发通知，循环自然终止）。
+    /// SwiftUI 每次状态刷新/打开文档都会把标题重设回 app 名（PDF 工具箱），
+    /// 而 NSWindow.title 不支持 KVO（observe(\.title) 收不到回调），故改用
+    /// NSWindowDidChangeTitleNotification：标题一变且非空立即清空并隐藏；
+    /// 清空为空串触发的下一次通知因 title 为空直接返回，循环自然终止。
     func attach(to window: NSWindow) {
-        if window.delegate === self {
-            // delegate 已挂，仅确保标题为空
-        } else {
+        if window.delegate !== self {
             previous = window.delegate
             window.delegate = self
         }
         if titleObserver == nil {
             titleObserver = NotificationCenter.default.addObserver(
-                forName: Notification.Name("NSWindowDidChangeTitle"), object: window, queue: .main
-            ) { [weak window] _ in
-                guard let window, !window.title.isEmpty else { return }
-                window.titleVisibility = .hidden
-                window.title = ""
+                forName: NSNotification.Name("NSWindowDidChangeTitle"),
+                object: window, queue: .main
+            ) { note in
+                guard let win = note.object as? NSWindow else { return }
+                MainActor.assumeIsolated {
+                    win.titleVisibility = .hidden
+                    if !win.title.isEmpty { win.title = "" }
+                }
             }
         }
-        if !window.title.isEmpty {
-            window.titleVisibility = .hidden
-            window.title = ""
-        }
+        window.titleVisibility = .hidden
+        if !window.title.isEmpty { window.title = "" }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard let doc = AppDelegate.docRef, doc.isDirty else { return true }
+        guard let ws = AppDelegate.workspaceRef, ws.active.doc.isDirty else { return true }
         let alert = NSAlert()
         alert.messageText = L("该文件尚未保存，是否关闭？")
         alert.alertStyle = .warning
@@ -226,7 +206,7 @@ final class CloseGuard: NSObject, NSWindowDelegate {
         alert.addButton(withTitle: L("确认"))
         alert.beginSheetModal(for: sender) { resp in
             if resp == .alertSecondButtonReturn {
-                AppDelegate.docRef?.isDirty = false
+                ws.active.doc.isDirty = false
                 sender.close()
             }
         }
