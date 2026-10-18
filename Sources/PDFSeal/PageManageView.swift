@@ -4,6 +4,50 @@ import AppKit
 import UniformTypeIdentifiers
 import SealCore
 
+// MARK: - 页面管理顶栏统一按钮风格
+
+/// 与编辑页工具栏同族的「无边框图标+文字」：悬停浅灰底、按下加深，小手光标。
+/// 动作类按钮（无激活态）；图标独占按钮（旋转）同样适用。
+struct FlatToolbarButtonStyle: ButtonStyle {
+    @State private var hovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13))
+            .padding(.horizontal, 6)
+            .frame(height: 26)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.primary.opacity(configuration.isPressed ? 0.12 : (hovering ? 0.06 : 0)))
+            )
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .handCursor()
+    }
+}
+
+/// Menu 专用标签：SwiftUI 的 Menu 不消费 ButtonStyle，需自带悬停底色。
+/// 配合 .menuStyle(.borderlessButton) 使用，视觉与 FlatToolbarButtonStyle 完全一致。
+struct FlatMenuLabel: View {
+    let title: String
+    let icon: String
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+            Text(L(title)).font(.system(size: 13))
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+        }
+        .padding(.horizontal, 6)
+        .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(hovering ? 0.06 : 0)))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .handCursor()
+    }
+}
+
 // MARK: - 页面管理：网格缩略图（点击选择 / ⌘ 多选 / ⇧ 连选 / 拖拽排序）+ 旋转/删除/插入/复制/粘贴/提取/度量
 
 struct PageManageView: View {
@@ -128,11 +172,14 @@ struct PageManageView: View {
             }
 
             Button { rotate(clockwise: false) } label: { Image(systemName: "rotate.left") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .help(L("向左旋转 90°"))
             Button { rotate(clockwise: true) } label: { Image(systemName: "rotate.right") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .help(L("向右旋转 90°"))
 
             Button { deleteSelected() } label: { Label(L("删除"), systemImage: "trash") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .keyboardShortcut(.delete, modifiers: [])
                 .help(L("删除选中页（页码联动收缩）"))
 
@@ -144,27 +191,37 @@ struct PageManageView: View {
                 Button(L("从剪贴板插入…")) { showInsertClipboard = true }
                 Divider()
                 Button(L("交叉插入…")) { showInterleave = true }
-            } label: { Label(L("插入页"), systemImage: "plus.rectangle.on.rectangle") }
-                .fixedSize()
-                .help(L("插入到选中页之后；未选中则插到末尾"))
+            } label: {
+                FlatMenuLabel(title: "插入页", icon: "plus.rectangle.on.rectangle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(L("插入到选中页之后；未选中则插到末尾"))
 
             Button { copyScope() } label: { Label(L("复制"), systemImage: "doc.on.doc") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .keyboardShortcut("c", modifiers: .command)
                 .help(L("复制应用范围内的页"))
             Button { paste() } label: { Label(L("粘贴"), systemImage: "doc.on.clipboard") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .keyboardShortcut("v", modifiers: .command)
                 .help(L("粘贴到选中页之后"))
             Button { extractSelected() } label: { Label(L("提取"), systemImage: "arrow.up.left.square") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .help(L("提取选中页另存"))
             Button { reverseOrder() } label: { Label(L("倒序"), systemImage: "arrow.up.arrow.down") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .help(L("把当前 PDF 按倒序重新排列"))
             Button { showSplit = true } label: { Label(L("拆分"), systemImage: "rectangle.split.2x1") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .disabled(doc.url == nil)
                 .help(L("按页数把当前 PDF 拆分为多个文件"))
 
             Divider().frame(height: 18)
 
             Button { showMeasure = true } label: { Label(L("度量"), systemImage: "ruler") }
+                .buttonStyle(FlatToolbarButtonStyle())
                 .help(L("度量 — 修改画幅"))
 
             Spacer()

@@ -542,6 +542,7 @@ struct StampWorkspaceView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 10) {
                     Button { showJigsaw = true } label: { Label(L("拼合校验"), systemImage: "square.on.square") }
+                        .buttonStyle(FlatToolbarButtonStyle())
                     Spacer()
                     Text(L("拖动章落位；⌘点击多选；⌘Z 撤销"))
                         .font(.caption)

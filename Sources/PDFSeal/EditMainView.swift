@@ -691,13 +691,14 @@ struct EditMainView: View {
                         .onTapGesture { value.wrappedValue = c }
                         .handCursor()
                 }
-                // 拾色器与色板拉开间距
-                ColorPicker("", selection: Binding(
+                // 圆形拾色器：填充当前色；非预设色生效时高亮描边
+                CircleColorPicker(color: Binding(
                     get: { value.wrappedValue ?? swatches[0] },
-                    set: { value.wrappedValue = $0 }), supportsOpacity: false)
-                    .labelsHidden()
-                    .frame(width: 28)
+                    set: { value.wrappedValue = $0 }),
+                    active: value.wrappedValue != nil && !swatches.contains(value.wrappedValue!))
+                    .frame(width: 16, height: 16)
                     .padding(.leading, 14)
+                    .handCursor()
             }
         }
     }
@@ -872,11 +873,63 @@ struct SwatchRow: View {
                     .onTapGesture { color = c }
                     .handCursor()
             }
-            ColorPicker("", selection: $color, supportsOpacity: false)
-                .labelsHidden()
-                .frame(width: 28)
+            // 圆形拾色器：填充当前色；当前色不是预设时高亮描边（自定义色生效中）
+            CircleColorPicker(color: $color,
+                              active: !EditMainView.swatches.contains(color))
+                .frame(width: 16, height: 16)
                 .padding(.leading, 14)   // 拾色器与色板拉开间距
+                .handCursor()
         }
+    }
+}
+
+// MARK: 圆形拾色器（替代系统矩形 ColorPicker：与色板圆点同规格的彩色圆点，点击弹系统调色板）
+
+/// 彩虹渐变圆点（同色板圆点规格）。不直接用 NSColorWell：它有 44×23 固有尺寸，
+/// SwiftUI frame 压不住会被拉成椭圆；改为自绘圆点 + 接管 NSColorPanel 的 target/action。
+struct CircleColorPicker: View {
+    @Binding var color: Color
+    /// true = 自定义颜色生效中，描边用强调色提示
+    var active: Bool = false
+
+    @State private var watcher = ColorPanelWatcher()
+
+    var body: some View {
+        Circle()
+            .fill(AngularGradient(colors: [.red, .orange, .yellow, .green, .cyan, .blue, .purple, .red],
+                                  center: .center))
+            .overlay(Circle().stroke(Color.primary.opacity(0.15), lineWidth: 1))
+            .overlay(Circle().stroke(active ? Color.accentColor : .clear, lineWidth: 2))
+            .onTapGesture {
+                watcher.begin(binding: $color)
+                NSColorPanel.shared.makeKeyAndOrderFront(nil)
+            }
+    }
+}
+
+/// NSColorPanel 颜色变化监听（KVO）：打开时把当前色带入面板，取色后回写绑定。
+/// 面板是全局单例，用 current 指针保证只有最近点开的拾色器回写。
+final class ColorPanelWatcher: NSObject {
+    private static weak var current: ColorPanelWatcher?
+    private var binding: Binding<Color>?
+    private var observing = false
+
+    func begin(binding: Binding<Color>) {
+        self.binding = binding
+        ColorPanelWatcher.current = self
+        let panel = NSColorPanel.shared
+        panel.color = NSColor(binding.wrappedValue)
+        if !observing {
+            panel.addObserver(self, forKeyPath: "color", options: [.new], context: nil)
+            observing = true
+        }
+    }
+
+    override func observeValue(forKeyPath keyPath: String?, of object: Any?,
+                               change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
+        guard ColorPanelWatcher.current === self, keyPath == "color",
+              let panel = object as? NSColorPanel else { return }
+        binding?.wrappedValue = Color(panel.color)
     }
 }
 
@@ -1721,12 +1774,10 @@ final class AnnotationPDFView: PDFView {
             return
         }
         switch activeTool {
-        case .textBox:
-            NSCursor.iBeam.set()
         case .eraser:
             NSCursor.crosshair.set()
         case .some(let t):
-            // 工具激活：光标落在本工具画的同类批注上切为小手（可点选编辑），否则十字准星
+            // 工具激活：光标落在本工具画的同类批注上切为小手（可点选编辑），否则绘制光标
             if let page = hitPage(event) {
                 let vp = convert(event.locationInWindow, from: nil)
                 let hit = annotationAt(convert(vp, to: page), page: page) { [weak self] anno in
@@ -1738,7 +1789,11 @@ final class AnnotationPDFView: PDFView {
                     return
                 }
             }
-            NSCursor.crosshair.set()
+            if t == .textBox {
+                NSCursor.iBeam.set()    // 文本工具空白处 = 可输入
+            } else {
+                NSCursor.crosshair.set()
+            }
         case .none:
             // 浏览模式：光标落在批注上时切为小手（提示此处已做过修改、可点选）
             if let page = hitPage(event),
@@ -1833,8 +1888,14 @@ final class AnnotationPDFView: PDFView {
             eraseAnnotation(at: pt, page: page)
             return
         }
-        // 文本工具：点击位置弹出输入框（不进入拖动流程）
+        // 文本工具：点击已有文本批注先选中/拖动；空白处弹出输入框
         if activeTool == .textBox {
+            if selectionMouseDown(event, allowed: { [weak self] anno in
+                guard let self else { return false }
+                return self.annotationMatchesTool(anno, .textBox)
+            }, fallbackToSuper: false) {
+                return
+            }
             showTextInput(page: page, point: pt)
             return
         }
