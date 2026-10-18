@@ -7,6 +7,9 @@ import SealCore
 
 @MainActor
 final class DocumentStore: ObservableObject {
+    /// 「隐藏」批注的标记（userName）：保存/另存为时据此把遮盖块压平进页面内容
+    static let redactMarker = "mPDF-redact"
+
     @Published var document: PDFDocument?
     @Published var url: URL?
     @Published var pageSizes: [CGSize] = []
@@ -15,6 +18,8 @@ final class DocumentStore: ObservableObject {
     @Published var isDirty: Bool = false
     /// 是否有未落盘的「页面结构」改动（增删/排序/旋转/度量）——保存时需先写基础文档
     @Published var hasPageEdits: Bool = false
+    /// 是否有未落盘的批注改动（编辑页高亮/矩形/直线/文字）——保存/另存为时需写文档
+    @Published var hasAnnotationEdits: Bool = false
     /// 页面行标识（页面管理 List 的稳定行 id，页操作后整体重建）
     @Published var pageIDs: [UUID] = []
     /// 页操作版本号（缩略图缓存失效用）
@@ -29,6 +34,10 @@ final class DocumentStore: ObservableObject {
     private var pageRedoStack: [PageEditSnapshot] = []
     private let maxPageUndoDepth = 30
 
+    /// 三路全局时间线（批注/章/页面）取最近者回退用
+    var lastPageUndoTime: Date? { pageUndoStack.last?.time }
+    var lastPageRedoTime: Date? { pageRedoStack.last?.time }
+
     private func takePageSnapshotDoc() -> PDFDocument? {
         guard let d = document else { return nil }
         let snap = PDFDocument()
@@ -42,10 +51,12 @@ final class DocumentStore: ObservableObject {
     func pushPageUndo(stampState: StampPageState) {
         guard let snapDoc = takePageSnapshotDoc() else { return }
         pageUndoStack.append(PageEditSnapshot(document: snapDoc, pageIDs: pageIDs,
-                                              hasPageEdits: hasPageEdits, stampState: stampState))
+                                              hasPageEdits: hasPageEdits, stampState: stampState,
+                                              time: Date()))
         if pageUndoStack.count > maxPageUndoDepth { pageUndoStack.removeFirst() }
         pageRedoStack.removeAll()
         refreshPageUndoFlags()
+        UndoCenter.shared.refresh()
     }
 
     func undoPageEdit(settings: StampSettings) {
@@ -53,9 +64,11 @@ final class DocumentStore: ObservableObject {
         if let cur = takePageSnapshotDoc() {
             pageRedoStack.append(PageEditSnapshot(document: cur, pageIDs: pageIDs,
                                                   hasPageEdits: hasPageEdits,
-                                                  stampState: settings.capturePageState()))
+                                                  stampState: settings.capturePageState(),
+                                                  time: Date()))
         }
         restorePageEdit(snap, settings: settings)
+        UndoCenter.shared.refresh()
     }
 
     func redoPageEdit(settings: StampSettings) {
@@ -63,9 +76,11 @@ final class DocumentStore: ObservableObject {
         if let cur = takePageSnapshotDoc() {
             pageUndoStack.append(PageEditSnapshot(document: cur, pageIDs: pageIDs,
                                                   hasPageEdits: hasPageEdits,
-                                                  stampState: settings.capturePageState()))
+                                                  stampState: settings.capturePageState(),
+                                                  time: Date()))
         }
         restorePageEdit(snap, settings: settings)
+        UndoCenter.shared.refresh()
     }
 
     private func restorePageEdit(_ snap: PageEditSnapshot, settings: StampSettings) {
@@ -86,6 +101,7 @@ final class DocumentStore: ObservableObject {
         pageUndoStack.removeAll()
         pageRedoStack.removeAll()
         refreshPageUndoFlags()
+        UndoCenter.shared.refresh()
     }
 
     private func refreshPageUndoFlags() {
@@ -126,6 +142,63 @@ final class DocumentStore: ObservableObject {
         hasPageEdits = false
         isDirty = false
         clearPageUndoHistory()
+    }
+
+    // MARK: 隐藏（redact）批注落盘压平
+
+    /// 写盘：含「隐藏」批注的页面在落盘时压平——遮盖块烘焙进页面内容、注释层不再携带，
+    /// 其余批注原样保留。内存中的文档不受影响（仍可撤销/继续编辑）。
+    func writeFlattened(to url: URL) -> Bool {
+        guard let d = document else { return false }
+        let hasRedact = (0..<d.pageCount).contains { i in
+            d.page(at: i)?.annotations.contains { $0.userName == Self.redactMarker } ?? false
+        }
+        guard hasRedact, let flat = Self.flattenRedactions(d), flat.write(to: url) else {
+            return d.write(to: url)   // 无隐藏批注或压平失败：原样写出兜底
+        }
+        return true
+    }
+
+    /// 压平隐藏批注：先整册序列化（让 PDFKit 生成全部外观流），再对含隐藏块的页面
+    /// 用 CGContext 重画——只画页面内容 + 按批注颜色填遮盖矩形，其余批注重新挂回注释层。
+    private static func flattenRedactions(_ d: PDFDocument) -> PDFDocument? {
+        // ① 序列化→读回，确保所有批注外观流已生成（副本可安全改写）
+        guard let data = d.dataRepresentation(), let src = PDFDocument(data: data) else { return nil }
+        let out = PDFDocument()
+        var any = false
+        for i in 0..<src.pageCount {
+            guard let page = src.page(at: i) else { continue }
+            let redacts = page.annotations.filter { $0.userName == redactMarker }
+            guard !redacts.isEmpty else {
+                out.insert(page, at: i)   // src 是临时读回的草稿文档，直接挪页即可
+                continue
+            }
+            any = true
+            let keep = page.annotations.filter { $0.userName != redactMarker }
+            for a in page.annotations { page.removeAnnotation(a) }   // 只画页面内容
+            let box = page.bounds(for: .mediaBox)
+            let flatData = NSMutableData()
+            var mediaBox = page.bounds(for: .mediaBox)
+            guard let consumer = CGDataConsumer(data: flatData as CFMutableData),
+                  let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, _: nil) else {
+                out.insert(page, at: i); continue
+            }
+            ctx.beginPDFPage(nil)
+            page.draw(with: .mediaBox, to: ctx)
+            for r in redacts {
+                ctx.setFillColor((r.color ?? .black).cgColor)
+                ctx.fill(r.bounds)
+            }
+            ctx.endPDFPage()
+            ctx.closePDF()
+            if let flatPage = PDFDocument(data: flatData as Data)?.page(at: 0) {
+                for a in keep { flatPage.addAnnotation(a) }   // 其余批注挂回注释层，仍可编辑
+                out.insert(flatPage, at: i)
+            } else {
+                out.insert(page, at: i)
+            }
+        }
+        return any ? out : nil
     }
 }
 
@@ -441,6 +514,7 @@ struct WatermarkSettings: Equatable {
     }
 }
 
+@MainActor
 final class StampSettings: ObservableObject {
     @Published var edge: SeamEdge = .right
     @Published var allPages = true
@@ -481,13 +555,31 @@ final class StampSettings: ObservableObject {
     /// 异步派发的，全局修饰键状态往往已重置，导致判定恒为 false。故用实时跟踪值。
     @Published var commandKeyDown = false
 
-    // MARK: - 撤销：统一时间线
-    /// 撤销动作（按发生时间排序）。⌘Z 弹栈顶：添加则移除该章，几何则还原快照。
-    private enum UndoAction {
-        case add(UUID)                           // 撤销「添加」= 移除该章
+    // MARK: - 撤销：统一时间线（带时间戳，供全局撤销中心排序；支持重做）
+    /// 撤销动作。⌘Z 弹栈顶：添加则移除该章，几何则还原快照。
+    private enum StampUndoAction {
+        case add(FullStampInstance)              // 撤销「添加」= 移除该章（存实例供重做）
         case geometry(UUID, FullStampSnapshot)   // 撤销「几何改动」= 还原快照
     }
-    private var undoActions: [UndoAction] = []
+    private enum StampRedoAction {
+        case add(FullStampInstance)              // 重做「添加」= 重新加入该章
+        case geometry(UUID, FullStampSnapshot)   // 重做「几何改动」= 套用改后快照
+    }
+    private struct StampUndoEntry { let action: StampUndoAction; let time: Date }
+    private struct StampRedoEntry { let action: StampRedoAction; let time: Date }
+    private var undoEntries: [StampUndoEntry] = []
+    private var redoEntries: [StampRedoEntry] = []
+
+    var canUndoStamp: Bool { !undoEntries.isEmpty }
+    var canRedoStamp: Bool { !redoEntries.isEmpty }
+    var lastUndoTime: Date? { undoEntries.last?.time }
+    var lastRedoTime: Date? { redoEntries.last?.time }
+
+    private func snapshot(_ inst: FullStampInstance) -> FullStampSnapshot {
+        FullStampSnapshot(anchor: inst.anchor, widthCm: inst.widthCm,
+                          heightCm: inst.heightCm, rotation: inst.rotation,
+                          opacity: inst.opacity)
+    }
 
     private(set) var pageCount = 0
 
@@ -498,7 +590,9 @@ final class StampSettings: ObservableObject {
         fullStamps = []
         selectedFullStampIDs = []
         primaryID = nil
-        undoActions = []
+        undoEntries = []
+        redoEntries = []
+        UndoCenter.shared.refresh()
     }
 
     /// 页面管理操作后同步页数（不清空章实例，与 syncPageCount 不同）
@@ -570,38 +664,67 @@ final class StampSettings: ObservableObject {
         fullStamps = []
         selectedFullStampIDs = []
         primaryID = nil
-        undoActions = []
+        undoEntries = []
+        redoEntries = []
     }
 
     /// 交互（拖动/缩放/点击落位/尺寸滑杆）开始前记录「改动前」快照，入统一时间线
     func pushUndo(_ id: UUID) {
         guard let inst = fullStamps.first(where: { $0.id == id }) else { return }
-        let snap = FullStampSnapshot(anchor: inst.anchor, widthCm: inst.widthCm,
-                                     heightCm: inst.heightCm, rotation: inst.rotation,
-                                     opacity: inst.opacity)
-        undoActions.append(.geometry(id, snap))
-        if undoActions.count > 200 { undoActions.removeFirst() }
+        undoEntries.append(StampUndoEntry(action: .geometry(id, snapshot(inst)), time: Date()))
+        if undoEntries.count > 200 { undoEntries.removeFirst() }
+        redoEntries.removeAll()   // 新动作清空重做线
+        UndoCenter.shared.refresh()
     }
 
-    /// ⌘Z / Ctrl+Z：撤销时间线上「最近一次」操作（添加章 或 几何改动）。
-    /// 栈顶动作指向的章已不存在（被其它途径删除）时，跳过并继续弹栈，直到命中有效动作。
+    /// 撤销最近一次章操作（添加/几何）。弹栈顶，指向的章已不存在时跳过继续。
     @discardableResult
     func undo() -> Bool {
-        while let action = undoActions.popLast() {
-            switch action {
-            case .add(let id):
-                guard fullStamps.contains(where: { $0.id == id }) else { continue }
-                fullStamps.removeAll { $0.id == id }
-                selectedFullStampIDs.remove(id)
-                if primaryID == id { primaryID = remainingPrimary() }
+        while let e = undoEntries.popLast() {
+            switch e.action {
+            case .add(let inst):
+                guard fullStamps.contains(where: { $0.id == inst.id }) else { continue }
+                redoEntries.append(StampRedoEntry(action: .add(inst), time: Date()))
+                fullStamps.removeAll { $0.id == inst.id }
+                selectedFullStampIDs.remove(inst.id)
+                if primaryID == inst.id { primaryID = remainingPrimary() }
+                UndoCenter.shared.refresh()
                 return true
             case .geometry(let id, let snap):
                 guard let i = fullStamps.firstIndex(where: { $0.id == id }) else { continue }
+                redoEntries.append(StampRedoEntry(action: .geometry(id, snapshot(fullStamps[i])), time: Date()))
                 fullStamps[i].anchor = snap.anchor
                 fullStamps[i].widthCm = snap.widthCm
                 fullStamps[i].heightCm = snap.heightCm
                 fullStamps[i].rotation = snap.rotation
                 fullStamps[i].opacity = snap.opacity
+                UndoCenter.shared.refresh()
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 重做最近一次被撤销的章操作
+    @discardableResult
+    func redo() -> Bool {
+        while let e = redoEntries.popLast() {
+            switch e.action {
+            case .add(let inst):
+                guard !fullStamps.contains(where: { $0.id == inst.id }) else { continue }
+                fullStamps.append(inst)
+                undoEntries.append(StampUndoEntry(action: .add(inst), time: Date()))
+                UndoCenter.shared.refresh()
+                return true
+            case .geometry(let id, let snap):
+                guard let i = fullStamps.firstIndex(where: { $0.id == id }) else { continue }
+                undoEntries.append(StampUndoEntry(action: .geometry(id, snapshot(fullStamps[i])), time: Date()))
+                fullStamps[i].anchor = snap.anchor
+                fullStamps[i].widthCm = snap.widthCm
+                fullStamps[i].heightCm = snap.heightCm
+                fullStamps[i].rotation = snap.rotation
+                fullStamps[i].opacity = snap.opacity
+                UndoCenter.shared.refresh()
                 return true
             }
         }
@@ -738,41 +861,47 @@ final class StampSettings: ObservableObject {
         }
         fullStamps.append(inst)
         selectOnly(inst.id)
-        undoActions.append(.add(inst.id))
+        undoEntries.append(StampUndoEntry(action: .add(inst), time: Date()))
+        redoEntries.removeAll()   // 新动作清空重做线
+        UndoCenter.shared.refresh()
     }
 
     func removeFullStamp(_ id: UUID) {
         fullStamps.removeAll { $0.id == id }
-        undoActions.removeAll {
-            if case .add(let aid) = $0 { return aid == id }
-            if case .geometry(let gid, _) = $0 { return gid == id }
+        undoEntries.removeAll {
+            if case .add(let inst) = $0.action { return inst.id == id }
+            if case .geometry(let gid, _) = $0.action { return gid == id }
             return false
         }
         selectedFullStampIDs.remove(id)
         if primaryID == id {
             primaryID = remainingPrimary()
         }
+        UndoCenter.shared.refresh()
     }
 
     /// 移除当前选中的所有章
     func removeSelectedFullStamps() {
         for id in selectedFullStampIDs {
             fullStamps.removeAll { $0.id == id }
-            undoActions.removeAll {
-                if case .add(let aid) = $0 { return aid == id }
-                if case .geometry(let gid, _) = $0 { return gid == id }
+            undoEntries.removeAll {
+                if case .add(let inst) = $0.action { return inst.id == id }
+                if case .geometry(let gid, _) = $0.action { return gid == id }
                 return false
             }
         }
         selectedFullStampIDs = []
         primaryID = nil
+        UndoCenter.shared.refresh()
     }
 
     func removeAllFullStamps() {
         fullStamps = []
         selectedFullStampIDs = []
         primaryID = nil
-        undoActions = []
+        undoEntries = []
+        redoEntries = []
+        UndoCenter.shared.refresh()
     }
 
     func anchor(of id: UUID) -> CGPoint? {
@@ -820,12 +949,13 @@ final class StampSettings: ObservableObject {
 
 // MARK: - 页面操作撤销快照
 
-/// 页面操作撤销快照：文档深拷贝 + 行 ID + 章页码状态
+/// 页面操作撤销快照：文档深拷贝 + 行 ID + 章页码状态 + 时间戳（全局时间线排序用）
 struct PageEditSnapshot {
     let document: PDFDocument
     let pageIDs: [UUID]
     let hasPageEdits: Bool
     let stampState: StampPageState
+    let time: Date
 }
 
 /// 章参数状态快照（页操作会联动章页码范围/removedPages）
@@ -833,4 +963,137 @@ struct StampPageState {
     var qifengStamps: [QifengInstance]
     var fullStamps: [FullStampInstance]
     var watermark: WatermarkSettings
+}
+
+// MARK: - 全局撤销/重做中心（批注 / 章 / 页面操作 三路时间线，按时间戳取最近者回退）
+
+@MainActor
+final class UndoCenter: ObservableObject {
+    static let shared = UndoCenter()
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
+
+    /// 活动会话引用（多标签切换时由 ContentView 重新绑定）
+    private weak var doc: DocumentStore?
+    private weak var stamps: StampSettings?
+
+    func bind(doc: DocumentStore, stamps: StampSettings) {
+        self.doc = doc
+        self.stamps = stamps
+        refresh()
+    }
+
+    func refresh() {
+        guard let doc, let st = stamps, let d = doc.document else {
+            setFlags(false, false)
+            return
+        }
+        let u = AnnotationUndoStack.shared.hasEntries(document: d)
+            || st.canUndoStamp || doc.canUndoPageEdit
+        let r = AnnotationUndoStack.shared.hasRedoEntries(document: d)
+            || st.canRedoStamp || doc.canRedoPageEdit
+        setFlags(u, r)
+    }
+
+    private func setFlags(_ u: Bool, _ r: Bool) {
+        if u != canUndo { canUndo = u }
+        if r != canRedo { canRedo = r }
+    }
+
+    /// 全局撤销：批注/章/页面三路时间线按时间戳取最近的一条回退
+    @discardableResult
+    func undo(doc ctxDoc: DocumentStore? = nil, stamps ctxStamps: StampSettings? = nil) -> Bool {
+        let doc = ctxDoc ?? self.doc
+        let st = ctxStamps ?? self.stamps
+        guard let doc, let st = st, let d = doc.document else { return false }
+        let aT = AnnotationUndoStack.shared.lastUndoTime(document: d)
+        let sT = st.lastUndoTime
+        let pT = doc.lastPageUndoTime
+        if let t = aT, t >= (sT ?? .distantPast), t >= (pT ?? .distantPast) {
+            if runAnnotationUndo(doc: doc, document: d) { return true }
+        }
+        if let t = sT, t >= (pT ?? .distantPast) {
+            if st.undo() { doc.isDirty = true; refresh(); return true }
+        }
+        if doc.canUndoPageEdit {
+            doc.undoPageEdit(settings: st)
+            refresh()
+            return true
+        }
+        // 优先级路径落空时按可用性兜底
+        if aT != nil, runAnnotationUndo(doc: doc, document: d) { return true }
+        if st.canUndoStamp, st.undo() { doc.isDirty = true; refresh(); return true }
+        refresh()
+        return false
+    }
+
+    /// 全局重做：批注/页面/章三路时间线按时间戳取最近的一条重放
+    @discardableResult
+    func redo(doc ctxDoc: DocumentStore? = nil, stamps ctxStamps: StampSettings? = nil) -> Bool {
+        let doc = ctxDoc ?? self.doc
+        let st = ctxStamps ?? self.stamps
+        guard let doc, let st = st, let d = doc.document else { return false }
+        let aT = AnnotationUndoStack.shared.lastRedoTime(document: d)
+        let sT = st.lastRedoTime
+        let pT = doc.lastPageRedoTime
+        if let t = aT, t >= (sT ?? .distantPast), t >= (pT ?? .distantPast) {
+            if runAnnotationRedo(doc: doc, document: d) { return true }
+        }
+        if let t = sT, t >= (pT ?? .distantPast) {
+            if st.redo() { doc.isDirty = true; refresh(); return true }
+        }
+        if doc.canRedoPageEdit {
+            doc.redoPageEdit(settings: st)
+            refresh()
+            return true
+        }
+        if aT != nil, runAnnotationRedo(doc: doc, document: d) { return true }
+        if st.canRedoStamp, st.redo() { doc.isDirty = true; refresh(); return true }
+        refresh()
+        return false
+    }
+
+    /// 撤销全部动作（沿全局时间线逐条回退，直到无可撤销）
+    func undoAll(doc: DocumentStore? = nil, stamps: StampSettings? = nil) {
+        var guardCount = 0
+        while undo(doc: doc, stamps: stamps), guardCount < 2000 { guardCount += 1 }
+    }
+
+    private func runAnnotationUndo(doc: DocumentStore, document: PDFDocument) -> Bool {
+        guard let e = AnnotationUndoStack.shared.pop(document: document) else { return false }
+        if let page = document.page(at: e.pageIndex) {
+            switch e.action {
+            case .added(let anno): page.removeAnnotation(anno)
+            case .removed(let anno): page.addAnnotation(anno)
+            case .replaced(let original, let pieces):
+                for p in pieces { page.removeAnnotation(p) }
+                page.addAnnotation(original)
+            case .geometry(let anno, let before, _):
+                before.apply(to: anno)
+            }
+        }
+        doc.isDirty = true
+        doc.hasAnnotationEdits = true
+        refresh()
+        return true
+    }
+
+    private func runAnnotationRedo(doc: DocumentStore, document: PDFDocument) -> Bool {
+        guard let e = AnnotationUndoStack.shared.popRedo(document: document) else { return false }
+        if let page = document.page(at: e.pageIndex) {
+            switch e.action {
+            case .added(let anno): page.addAnnotation(anno)
+            case .removed(let anno): page.removeAnnotation(anno)
+            case .replaced(let original, let pieces):
+                page.removeAnnotation(original)
+                for p in pieces { page.addAnnotation(p) }
+            case .geometry(let anno, _, let after):
+                after.apply(to: anno)
+            }
+        }
+        doc.isDirty = true
+        doc.hasAnnotationEdits = true
+        refresh()
+        return true
+    }
 }

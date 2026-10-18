@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-APP_NAME="PDF工具箱"
+APP_NAME="mPDF"
 BUNDLE_ID="com.yin.pdfseal"
 BUILD_DIR="build"
 APP="$BUILD_DIR/$APP_NAME.app"
@@ -60,8 +60,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>$APP_NAME</string>
     <key>CFBundleDisplayName</key><string>$APP_NAME</string>
     <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key><string>2.6.4</string>
-    <key>CFBundleShortVersionString</key><string>2.6.4</string>
+    <key>CFBundleVersion</key><string>2.8.5</string>
+    <key>CFBundleShortVersionString</key><string>2.8.5</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>

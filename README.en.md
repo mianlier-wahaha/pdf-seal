@@ -1,8 +1,8 @@
-# PDF Seal
+# mPDF
 
 [简体中文](README.md) | [English](README.en.md) | [繁體中文](README.zh-Hant.md)
 
-A native macOS app for stamping **electronic seam stamps (骑缝章)** and **body stamps** on PDF files. Built with SwiftUI + PDFKit/CoreGraphics — zero third-party dependencies, fully local processing, no uploads.
+A lightweight native macOS PDF toolbox (formerly "PDF Seal") with four sections: **Preview / Stamp / Pages / Edit**. Built with SwiftUI + PDFKit/CoreGraphics — zero third-party dependencies, fully local processing, no uploads.
 
 ![platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey) ![Swift](https://img.shields.io/badge/Swift-5.9-orange) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -41,19 +41,43 @@ A native macOS app for stamping **electronic seam stamps (骑缝章)** and **bod
 - Context-menu rename; library persists across launches
 
 ### Preview & Files
+- Multi-tab workspace: open several PDFs at once; drag tabs to reorder, × to close
 - Zoom: pinch gesture / text field / presets (25%–200%)
 - Page jumping, bottom status bar
 - Save (overwrite) / Save As / Close
+- "More" menu: compress, password encryption, export as images, image-based PDF
 - WYSIWYG preview matching exported output (including opacity)
 - `Esc` deselects
 - UI languages: 简体中文 / 繁體中文 / English
 
+### Page Management
+- Grid thumbnail view: click to select, `⌘` / `⇧` multi-select, drag to reorder
+- Insert: from file / clipboard image / blank pages, with **interleaved insert** (odd-even positions + reverse order, with a diagram)
+- Rotate / delete / extract selected pages; reverse all with one click
+- Split: by page count / by file size, with background size estimation in the dialog
+- Print (`⌘P`)
+
+### Edit (Annotations)
+- **Highlight**: adjustable color / opacity
+- **Underline / strikeout**: incl. wavy style; color and line width match output exactly
+- **Pen**: freehand drawing with adjustable color / width
+- **Shapes**: rectangle / ellipse / line / arrow / double arrow, with border style, line width, fill color and fill pattern
+- **Text box**: font / size / color / background color / 90° rotation, live preview while typing
+- **Redact** (cover-up): optional fill color, flattened automatically on save
+- **Eraser**: erase whole strokes or just the touched part (strokes split automatically)
+- **Annotation selection**: hovering shows a pointing hand → click to show handles; move, 8-handle resize (rect/ellipse), endpoint dragging (lines/arrows), rotation (text), delete (`Delete` or ✕); handles show direction-aware resize cursors
+- **Global undo / redo / undo all** (`⌘Z` / `⇧⌘Z`): one unified timeline for annotations, stamps and page operations, effective in every section
+
 ## Usage
 
-1. Open a PDF (drag it onto the window or ⌘O)
-2. In the right panel, pick a seal → set edge / page range / ratios → click "Add" for a seam stamp; or click on a page to place a body stamp
-3. Review positions in the preview (drag, resize, delete per page as needed)
-4. Save or Save As to export
+1. Open a PDF (drag it onto the window / ⌘O / "Choose File" in the workspace)
+2. Switch sections at the top: **Preview** to review → **Stamp** for seam/body stamps → **Pages** to organize pages → **Edit** for highlights, shapes, text and redactions
+3. Annotations are selected right after drawing — drag / resize / delete as needed; `⌘Z` undoes any step
+4. Save or Save As to export (redactions are flattened automatically)
+
+## Download
+
+- [Download from Releases](https://github.com/mianlier-wahaha/pdf-seal/releases/latest) —— `mPDF.dmg` (standard installer image, drag to Applications) or `mPDF.zip` (portable archive), macOS Apple Silicon
 
 ## Requirements
 

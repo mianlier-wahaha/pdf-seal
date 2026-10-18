@@ -558,6 +558,7 @@ struct MeasureSheet: View {
         }
         .padding(20)
         .frame(width: 460)
+        .dialogCard()
         .onAppear { prefill() }
     }
 
@@ -760,6 +761,7 @@ struct InsertFromFileSheet: View {
         }
         .padding(24)
         .frame(width: 600)
+        .dialogCard()
     }
 
     private func doInsert() {
@@ -1118,6 +1120,7 @@ struct SplitSheet: View {
         }
         .padding(24)
         .frame(width: 480)
+        .dialogCard()
         .onChange(of: sizeMB) { _ in
             if mode == .size, validMB != nil, byteSizes.isEmpty { refreshSizes() }
         }

@@ -604,9 +604,32 @@ final class ThumbStore: ObservableObject {
     }
 }
 
+/// 统一卡片样式：大圆角 + 柔和投影（弹窗内容分区 / 卡片通用），
+/// 让浅色与深色主题下的浮层都有「浮起」层次感。
+struct DialogCardStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(0.10), radius: 7, x: 0, y: 2)
+    }
+}
+
+extension View {
+    /// 应用统一卡片样式（大圆角 + 柔和投影）
+    func dialogCard() -> some View {
+        modifier(DialogCardStyle())
+    }
+}
+
 /// 弹窗底部按钮统一样式：加大尺寸更易点击（prominent = 主操作蓝底白字）
-struct DialogButtonStyle: ButtonStyle {
-    var prominent = false
+struct DialogButtonStyle: ButtonStyle {    var prominent = false
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {

@@ -36,6 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard keyMonitor == nil, flagsMonitor == nil,
               seals != nil, workspace != nil else { return }
 
+        // macOS 27 PDFKit 注记马赛克修复（私有层 contentsScale=1.0 + nearest 采样系统 bug）
+        PDFKitAnnotationQualityFix.install()
+
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             return self.handle(keyDown: event)
@@ -75,22 +78,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
 
-        // ⌘Z / Ctrl+Z：统一时间线撤销（先章操作，无章可撤则撤页面操作）；⇧⌘Z 重做页面操作
+        // ⌘Z / Ctrl+Z：全局撤销中心（批注/章/页面 三路时间线取最近者回退）；⇧⌘Z 重做
         if event.keyCode == 6, event.characters?.lowercased() == "z",
            event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control) {
             guard let ws = workspace else { return event }
             let st = ws.active.settings
             if event.modifierFlags.contains(.shift) {
-                if ws.active.doc.canRedoPageEdit {
-                    ws.active.doc.redoPageEdit(settings: st)
-                    return nil
-                }
+                if UndoCenter.shared.redo(doc: ws.active.doc, stamps: st) { return nil }
             } else {
-                if st.undo() == true { return nil }
-                if ws.active.doc.canUndoPageEdit {
-                    ws.active.doc.undoPageEdit(settings: st)
-                    return nil
-                }
+                if UndoCenter.shared.undo(doc: ws.active.doc, stamps: st) { return nil }
             }
         }
 
