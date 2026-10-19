@@ -2075,6 +2075,8 @@ final class AnnotationPDFView: PDFView {
     deinit {
         if let obs = scrollObserver { NotificationCenter.default.removeObserver(obs) }
         if let obs = zoomObserver { NotificationCenter.default.removeObserver(obs) }
+        cursorEnforceTimer?.invalidate()
+        scrollFollowTimer?.invalidate()
     }
 
     private func canvasDidScroll() {
@@ -2094,6 +2096,34 @@ final class AnnotationPDFView: PDFView {
         if Self.probeLogging { uitestLog("[SCROLL] canvasDidScroll fired sel=%d", selectedAnno != nil ? 1 : 0) }
         if selectedAnno != nil { updateSelectionOverlay() }
         if textPopup != nil { syncGhostFromEditor() }
+    }
+
+    // MARK: 滚动期间 60fps 跟随
+    // 黑匣子实证：clip bounds 变化通知到达时 PDFKit 页面几何尚未落定，立即重算拿到的是
+    // 上一步坐标 → overlay 恒落后一个滚动步长、停滚后无新通知就永远差一步。
+    // 解法：滚轮活动期间 60fps 重算（每次都在最新布局之后），停滚 0.25s 后收敛一次并停止。
+    private var scrollFollowTimer: Timer?
+    private var scrollFollowDeadline: CFTimeInterval = 0
+
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+        scrollFollowDeadline = CACurrentMediaTime() + 0.25
+        guard scrollFollowTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard CACurrentMediaTime() < self.scrollFollowDeadline else {
+                self.scrollFollowTimer?.invalidate()
+                self.scrollFollowTimer = nil
+                // 停滚收敛：用落定后的几何做最后一次校准
+                if self.selectedAnno != nil { self.updateSelectionOverlay() }
+                if self.textPopup != nil { self.syncGhostFromEditor() }
+                return
+            }
+            if self.selectedAnno != nil { self.updateSelectionOverlay() }
+            if self.textPopup != nil { self.syncGhostFromEditor() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        scrollFollowTimer = t
     }
 
     func clearOverlay() {
@@ -2228,8 +2258,11 @@ final class AnnotationPDFView: PDFView {
         if activeTool == .eraser {
             updateEraserCursor(atView: vp)
         }
-        updateCursor(at: event)
+        // ⭐ super 必须在前：PDFView 会在自身 mouseMoved 链路里重设光标（箭头/I-beam），
+        // 后设者生效——super 放后面会立刻覆盖我们刚设的缩放箭头/小手（黑匣子实证 handle 命中但光标不变）。
         super.mouseMoved(with: event)
+        updateCursor(atView: vp)
+        ensureCursorEnforcement()
     }
 
     static var diagMMCount = 0
@@ -2247,83 +2280,115 @@ final class AnnotationPDFView: PDFView {
             super.cursorUpdate(with: event)
             return
         }
-        updateCursor(at: event)
+        // ⭐ super 先设（PDFKit 的箭头/I-beam），我们随后覆盖——后设者生效
+        super.cursorUpdate(with: event)
+        updateCursor(atView: convert(event.locationInWindow, from: nil))
+        ensureCursorEnforcement()
     }
 
-    /// 按当前位置统一计算光标（cursorUpdate / mouseMoved / mouseUp 共用）
     private func updateCursor(at event: NSEvent) {
-        if Self.probeLogging {
-            let p = convert(event.locationInWindow, from: nil)
-            uitestLog("[CURSOR] enter vp=%@ handle=%@ tool=%@ sel=%d",
-                      NSStringFromPoint(p),
-                      hoverHandleIndex(atView: p).map { "\($0)" } ?? "nil",
-                      activeTool.map { "\($0)" } ?? "nil", selectedAnno != nil ? 1 : 0)
-        }
+        updateCursor(atView: convert(event.locationInWindow, from: nil))
+    }
+
+    /// 按当前位置统一计算光标（cursorUpdate / mouseMoved / 执行器共用）
+    private func updateCursor(atView vp: NSPoint) {
         // 选中批注可能已被撤销/橡皮擦删除（不经过本视图）：发现即收起选中框
         if let anno = selectedAnno, let page = selectedPage, !page.annotations.contains(anno) {
             deselectAnnotation()
         }
         // 选中态：光标悬停缩放控制点 → 对应方向的缩放双箭头（四角斜 45°、边中点垂直于边）
-        if let h = hoverHandleIndex(atView: convert(event.locationInWindow, from: nil)) {
+        if let h = hoverHandleIndex(atView: vp) {
             switch h {
-            case 0, 3: Self.diagNECursor.set()      // 左下/右上：↗↙
-            case 1, 2: Self.diagNWCursor.set()      // 右下/左上：↖↘
-            case 4, 6: NSCursor.resizeUpDown.set()  // 下中/上中：垂直双箭头
-            default: NSCursor.resizeLeftRight.set() // 右中/左中：水平双箭头
+            case 0, 3: applyCursor(Self.diagNECursor, "handle\(h)-NE")   // 左下/右上：↗↙
+            case 1, 2: applyCursor(Self.diagNWCursor, "handle\(h)-NW")   // 右下/左上：↖↘
+            case 4, 6: applyCursor(.resizeUpDown, "handle\(h)-UD")       // 下中/上中：垂直双箭头
+            default: applyCursor(.resizeLeftRight, "handle\(h)-LR")      // 右中/左中：水平双箭头
             }
             return
         }
         // 直线类：悬停两端点圆点 → 按端点相对线中心方位给斜向缩放光标（拉伸方向与拖动方向一致）
-        let vp = convert(event.locationInWindow, from: nil)
         if selectedAnno != nil, !overlayView.isHidden {
             let knobs = overlayView.endpointKnobs
             if knobs.count == 2 {
                 for k in knobs where hypot(vp.x - k.x, vp.y - k.y) <= 10 {
                     let c = NSPoint(x: (knobs[0].x + knobs[1].x) / 2, y: (knobs[0].y + knobs[1].y) / 2)
                     // 端点在中心右上/左下象限 → 沿 ↗↙ 拉伸；左上/右下 → ↖↘
-                    ((vp.x - c.x) * (vp.y - c.y) > 0 ? Self.diagNECursor : Self.diagNWCursor).set()
+                    applyCursor((vp.x - c.x) * (vp.y - c.y) > 0 ? Self.diagNECursor : Self.diagNWCursor, "line-end")
                     return
                 }
             }
             // 旋转钮 / 删除钮：小手提示可点
             if knobHit(overlayView.rotationKnob, radius: 8, vp: vp)
                 || knobHit(overlayView.deleteKnob, radius: 8, vp: vp) {
-                NSCursor.pointingHand.set()
+                applyCursor(.pointingHand, "knob-hand")
                 return
             }
         }
         switch activeTool {
         case .eraser:
-            NSCursor.crosshair.set()
+            applyCursor(.crosshair, "crosshair-eraser")
         case .some(let t):
             // 工具激活：光标落在本工具画的同类批注上切为小手（可点选编辑），否则绘制光标
-            if let page = hitPage(event) {
-                let vp = convert(event.locationInWindow, from: nil)
+            if let page = hitPage(atView: vp) {
                 let hit = annotationAt(convert(vp, to: page), page: page) { [weak self] anno in
                     guard let self else { return false }
                     return self.annotationMatchesTool(anno, t)
                 }
                 if hit != nil {
-                    NSCursor.pointingHand.set()
+                    applyCursor(.pointingHand, "tool-hand")
                     return
                 }
             }
             if t == .textBox {
-                NSCursor.iBeam.set()    // 文本工具空白处 = 可输入
-            } else if toolSupportsTextMarkup, let page = hitPage(event), pageHasText(page) {
-                NSCursor.iBeam.set()    // 高亮/下划线/删除线在文字层页面 = 可划选文字
+                applyCursor(.iBeam, "ibeam-text")    // 文本工具空白处 = 可输入
+            } else if toolSupportsTextMarkup, let page = hitPage(atView: vp), pageHasText(page) {
+                applyCursor(.iBeam, "ibeam-markup")  // 高亮/下划线/删除线在文字层页面 = 可划选文字
             } else {
-                NSCursor.crosshair.set()
+                applyCursor(.crosshair, "crosshair")
             }
         case .none:
             // 浏览模式：光标落在批注上时切为小手（提示此处已做过修改、可点选）
-            if let page = hitPage(event),
-               annotationAt(convert(convert(event.locationInWindow, from: nil), to: page), page: page) != nil {
-                NSCursor.pointingHand.set()
+            if let page = hitPage(atView: vp),
+               annotationAt(convert(vp, to: page), page: page) != nil {
+                applyCursor(.pointingHand, "browse-hand")
             } else {
-                NSCursor.arrow.set()
+                applyCursor(.arrow, "arrow")
             }
         }
+    }
+
+    /// 统一设光标 + 黑匣子记录（状态变化才记一条，便于事后定位「谁把光标抢走了」）
+    private var lastCursorTag: String?
+    private func applyCursor(_ c: NSCursor, _ tag: String) {
+        if lastCursorTag != tag {
+            Self.diag("cursor -> \(tag)")
+            lastCursorTag = tag
+        }
+        c.set()
+    }
+
+    // MARK: 光标执行器——PDFKit/系统随时可能把光标重置回箭头，
+    // 选中/工具态下以 20Hz 低频重申当前应有的光标（开销可忽略，画布外不抢）
+    private var cursorEnforceTimer: Timer?
+
+    private func ensureCursorEnforcement() {
+        guard selectedAnno != nil || activeTool != nil else { return }
+        guard cursorEnforceTimer == nil else { return }
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard self.selectedAnno != nil || self.activeTool != nil,
+                  let w = self.window, w.isKeyWindow else {
+                self.cursorEnforceTimer?.invalidate()
+                self.cursorEnforceTimer = nil
+                return
+            }
+            let wp = w.convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
+            let vp = self.convert(wp, from: nil)
+            guard self.bounds.contains(vp) else { return }   // 画布外不抢其他视图的光标
+            self.updateCursor(atView: vp)
+        }
+        RunLoop.main.add(t, forMode: .common)
+        cursorEnforceTimer = t
     }
 
     /// 光标当前悬停的缩放控制点下标（复用拖拽命中的同一套矩形，未显示控制点时返回 nil）
@@ -3425,7 +3490,10 @@ final class AnnotationPDFView: PDFView {
     }
 
     private func hitPage(_ event: NSEvent) -> PDFPage? {
-        let loc = convert(event.locationInWindow, from: nil)
-        return page(for: loc, nearest: true)
+        hitPage(atView: convert(event.locationInWindow, from: nil))
+    }
+
+    private func hitPage(atView loc: NSPoint) -> PDFPage? {
+        page(for: loc, nearest: true)
     }
 }

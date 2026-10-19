@@ -2,6 +2,15 @@
 
 所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [2.9.4] - 2026-10-19
+
+### 修复
+- **悬停光标被抢占**：黑匣子实证 `mouseMoved` 里控制点命中检测正常（`handle=1/5/7/0`）但光标仍不变化——`super.mouseMoved`/`super.cursorUpdate` 在我们 `NSCursor.set()` 之后执行，PDFKit 把光标重置回箭头。改为 **super 先行、我们后设**（后设者生效）；并新增 20Hz「光标执行器」在选中/工具态下低频重申当前光标（画布外不抢，未选中且无工具时自动停止），任何抢占源都无法再覆盖。
+- **滚动后选中框脱离图形**：黑匣子 `SCROLL-MISMATCH` 显示 overlay 恒定落后一个滚动步长——`boundsDidChangeNotification` 到达时 PDFKit 页面几何尚未落定，立即重算拿到上一步坐标；停滚后无新通知即永远差一步。新增滚动期间 60fps 跟随（滚轮活动后 0.25s 内每帧校准），停滚收敛一次。
+
+### 其他
+- 光标决策统一为 `updateCursor(atView:)` 纯坐标版本；黑匣子新增 `cursor -> 标签` 状态变化记录。
+
 ## [2.9.3] - 2026-10-19
 
 ### Fixed — 悬停光标与滚动跟随两大失效（事件源接错）
