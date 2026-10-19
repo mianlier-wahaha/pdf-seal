@@ -2,6 +2,13 @@
 
 所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [2.9.3] - 2026-10-19
+
+### Fixed — 悬停光标与滚动跟随两大失效（事件源接错）
+- **悬停光标全失效（缩放箭头/小手不出现）**：`acceptsMouseMovedEvents` 开关原来写在 `updateTrackingAreas()` 里，执行时 window 多半还是 nil、之后无人补设 → 系统从不派发 mouseMoved，光标逻辑形同虚设。改为在 `viewDidMoveToWindow()` 挂窗后开启，控制点斜向缩放光标、端点光标、旋转/删除钮小手全部生效
+- **滚动后选中框与图形脱离**：原来监听的是 `enclosingScrollView`（外层容器），而 PDFView 的页面滚动发生在其**内部私有 NSScrollView**——外层不动、通知永不来。改为递归搜索子视图树找到内部滚动视图并监听其 clip view bounds
+- **缩放跟随补齐**：同时监听内部 documentView 的 frame 变化（scaleFactor 改变时 clip bounds 未必动），缩放后选中框/ghost 编辑器同样同步
+
 ## [2.9.2] - 2026-10-19
 
 ### Added — 双击编辑既有文本批注（借鉴 PdfCraft Composer）

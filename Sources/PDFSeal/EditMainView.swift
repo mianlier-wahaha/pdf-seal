@@ -1808,22 +1808,58 @@ final class AnnotationPDFView: PDFView {
     // MARK: 滚动跟随（选中框 / ghost 编辑器与页面同步）
 
     private var scrollObserver: NSObjectProtocol?
+    private var zoomObserver: NSObjectProtocol?
 
     /// 滚动视图 bounds 变化（滚动/缩放）→ 重算选中框与编辑器位置。
     /// 不监听的话 overlay 画在视图空间的旧位置上，页面一动定位框就与图形分离。
+    /// ⚠️ 关键：PDFView 的页面滚动发生在其**内部** NSScrollView（PDFKit 私有层级），
+    /// enclosingScrollView 是外层容器——内部滚动时它不动、不发光标通知（v2.9.2 滚动脱离真因）。
+    /// 必须递归找到内部 NSScrollView 才接对了事件源。
     private func attachScrollObserver() {
-        if scrollObserver != nil { return }
-        guard let clip = enclosingScrollView?.contentView else { return }
+        guard window != nil, scrollObserver == nil else { return }
+        guard let scrollView = innerScrollView() ?? enclosingScrollView else { return }
+        let clip = scrollView.contentView
         clip.postsBoundsChangedNotifications = true
         scrollObserver = NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
         ) { [weak self] _ in
             self?.canvasDidScroll()
         }
+        // 缩放跟随：scaleFactor 改变时 documentView frame 变化、clip bounds 未必动
+        if let docView = scrollView.documentView {
+            docView.postsFrameChangedNotifications = true
+            zoomObserver = NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: docView, queue: .main
+            ) { [weak self] _ in
+                self?.canvasDidScroll()
+            }
+        }
+    }
+
+    /// 递归搜索子视图树里的内部 NSScrollView（PDFKit 不公开，只能遍历）
+    private func innerScrollView() -> NSScrollView? {
+        func dfs(_ v: NSView) -> NSScrollView? {
+            if let sv = v as? NSScrollView { return sv }
+            for s in v.subviews { if let r = dfs(s) { return r } }
+            return nil
+        }
+        return dfs(self)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // ⭐ mouseMoved 派发开关必须在挂窗后设置：updateTrackingAreas 执行时 window 多半还是 nil，
+        // 光标逻辑写在 mouseMoved 里却永远收不到事件（v2.9.2 悬停光标全失效真因）。
+        window?.acceptsMouseMovedEvents = true
+        // 换窗后旧滚动视图作废，重挂监听
+        if let obs = scrollObserver { NotificationCenter.default.removeObserver(obs); scrollObserver = nil }
+        if let obs = zoomObserver { NotificationCenter.default.removeObserver(obs); zoomObserver = nil }
+        attachScrollObserver()
     }
 
     deinit {
         if let obs = scrollObserver { NotificationCenter.default.removeObserver(obs) }
+        if let obs = zoomObserver { NotificationCenter.default.removeObserver(obs) }
     }
 
     private func canvasDidScroll() {
