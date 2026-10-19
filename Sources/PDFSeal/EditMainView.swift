@@ -947,6 +947,9 @@ enum AnnotationUndoAction {
     case addedBatch([PDFAnnotation])
     /// 几何改动（选中后移动/缩放/旋转）：撤销还原 before 快照，重做套用 after 快照
     case geometry(PDFAnnotation, before: AnnotationGeomSnapshot, after: AnnotationGeomSnapshot)
+    /// 文本内容编辑（双击已有文本框改字）：撤销 = 还原 before 文字与几何，重做 = 套用 after
+    case textEdited(PDFAnnotation, beforeGeom: AnnotationGeomSnapshot, beforeText: String,
+                    afterGeom: AnnotationGeomSnapshot, afterText: String)
 }
 
 /// 批注几何快照：bounds + 自绘类扩展状态（笔迹点列 / 形状 contentRect / 文本旋转 / 直线端点）
@@ -1664,6 +1667,14 @@ struct AnnotationPageView: NSViewRepresentable {
             doc.hasAnnotationEdits = true
             onAdded()
         }
+        v.onTextEdited = { pageIdx, anno, beforeGeom, beforeText, afterGeom, afterText in
+            AnnotationUndoStack.shared.push(document: doc.document!, pageIndex: pageIdx,
+                                            action: .textEdited(anno, beforeGeom: beforeGeom, beforeText: beforeText,
+                                                                afterGeom: afterGeom, afterText: afterText))
+            doc.isDirty = true
+            doc.hasAnnotationEdits = true
+            onAdded()
+        }
         context.coordinator.syncState(v, tool: tool, settings: settings)
         return v
     }
@@ -1708,6 +1719,8 @@ final class AnnotationPDFView: PDFView {
     var onAddBatch: ((Int, [PDFAnnotation]) -> Void)? = nil
     /// 选中态几何改动（移动/缩放/旋转）完成：仅刷脏标记，撤销记录由交互结束处统一入栈
     var onGeometryEdited: (() -> Void)? = nil
+    /// 双击编辑既有文本批注提交：单条 textEdited 撤销记录（before/after 文字+几何）
+    var onTextEdited: ((Int, PDFAnnotation, AnnotationGeomSnapshot, String, AnnotationGeomSnapshot, String) -> Void)? = nil
 
     /// 橡皮擦可删除的批注类型（PDFAnnotation.type 字符串）
     private static let erasableTypes: Set<String> = [
@@ -1966,6 +1979,25 @@ final class AnnotationPDFView: PDFView {
             }
             return
         }
+        // 直线类：悬停两端点圆点 → 按端点相对线中心方位给斜向缩放光标（拉伸方向与拖动方向一致）
+        let vp = convert(event.locationInWindow, from: nil)
+        if selectedAnno != nil, !overlayView.isHidden {
+            let knobs = overlayView.endpointKnobs
+            if knobs.count == 2 {
+                for k in knobs where hypot(vp.x - k.x, vp.y - k.y) <= 10 {
+                    let c = NSPoint(x: (knobs[0].x + knobs[1].x) / 2, y: (knobs[0].y + knobs[1].y) / 2)
+                    // 端点在中心右上/左下象限 → 沿 ↗↙ 拉伸；左上/右下 → ↖↘
+                    ((vp.x - c.x) * (vp.y - c.y) > 0 ? Self.diagNECursor : Self.diagNWCursor).set()
+                    return
+                }
+            }
+            // 旋转钮 / 删除钮：小手提示可点
+            if knobHit(overlayView.rotationKnob, radius: 8, vp: vp)
+                || knobHit(overlayView.deleteKnob, radius: 8, vp: vp) {
+                NSCursor.pointingHand.set()
+                return
+            }
+        }
         switch activeTool {
         case .eraser:
             NSCursor.crosshair.set()
@@ -2066,8 +2098,14 @@ final class AnnotationPDFView: PDFView {
     // MARK: 鼠标拦截（工具激活时不滚动）
 
     override func mouseDown(with event: NSEvent) {
-        // 浏览模式：全部批注可选中交互；空白处交给 PDFView
+        // 浏览模式：双击文本批注原地改字；否则全部批注可选中交互，空白处交给 PDFView
         if activeTool == nil {
+            if event.clickCount >= 2, let page = hitPage(event),
+               let hit = annotationAt(convert(convert(event.locationInWindow, from: nil), to: page), page: page),
+               hit is RotatableTextAnnotation {
+                beginTextEdit(hit, page: page)
+                return
+            }
             selectionMouseDown(event, fallbackToSuper: true)
             return
         }
@@ -2083,8 +2121,13 @@ final class AnnotationPDFView: PDFView {
             eraseAnnotation(at: pt, page: page)
             return
         }
-        // 文本工具：点击已有文本批注先选中/拖动；空白处弹出输入框
+        // 文本工具：双击已有文本批注原地改字；单击选中/拖动；空白处弹出输入框
         if activeTool == .textBox {
+            if event.clickCount >= 2,
+               let hit = annotationAt(pt, page: page, allowed: { $0 is RotatableTextAnnotation }) {
+                beginTextEdit(hit, page: page)
+                return
+            }
             if selectionMouseDown(event, allowed: { [weak self] anno in
                 guard let self else { return false }
                 return self.annotationMatchesTool(anno, .textBox)
@@ -2139,7 +2182,15 @@ final class AnnotationPDFView: PDFView {
             return
         }
         guard startPt != nil else { return }
-        currentPt = pt
+        // 矩形/椭圆按住 Shift = 正方形/正圆（从起点向拖动方向取最长轴）
+        if activeTool == .shape, event.modifierFlags.contains(.shift),
+           settings.shapeVariant == .rect || settings.shapeVariant == .ellipse {
+            let s = max(abs(pt.x - startPt!.x), abs(pt.y - startPt!.y))
+            currentPt = NSPoint(x: startPt!.x + (pt.x >= startPt!.x ? s : -s),
+                                y: startPt!.y + (pt.y >= startPt!.y ? s : -s))
+        } else {
+            currentPt = pt
+        }
         if activeTool == .pen, let last = penPoints.last,
            hypot(pt.x - last.x, pt.y - last.y) > 1.2 {
             penPoints.append(pt)
@@ -2419,7 +2470,8 @@ final class AnnotationPDFView: PDFView {
         case .moving:
             geom = orig.translated(by: NSPoint(x: pt.x - selStartPagePt.x, y: pt.y - selStartPagePt.y))
         case .resizing:
-            geom = Self.resized(orig, handle: selDragHandle, to: pt)
+            geom = Self.resized(orig, handle: selDragHandle, to: pt,
+                                keepRatio: event.modifierFlags.contains(.shift))
         case .resizingLine:
             geom = Self.lineEndpointResized(orig, handle: selDragHandle, to: pt)
         case .rotating:
@@ -2452,16 +2504,33 @@ final class AnnotationPDFView: PDFView {
 
     /// 按控制点拖拽缩放矩形快照（页面空间；最小 6pt）
     /// handle: 0=左下 1=右下 2=左上 3=右上 4=下中 5=右中 6=上中 7=左中
-    /// 对角/对边固定：先在原始 bounds 上锁定不动的边，再由拖动点重算活动边
-    private static func resized(_ orig: AnnotationGeomSnapshot, handle: Int, to pt: NSPoint) -> AnnotationGeomSnapshot {
+    /// 对角/对边固定：先在原始 bounds 上锁定不动的边，再由拖动点重算活动边。
+    /// 角手柄 + Shift（keepRatio）：pdfcraft 式等比缩放——对角锚点固定，
+    /// 宽 = max(请求宽, 请求高×宽高比, 最小值)，拖过对边也永不翻转。
+    private static func resized(_ orig: AnnotationGeomSnapshot, handle: Int, to pt: NSPoint,
+                                keepRatio: Bool = false) -> AnnotationGeomSnapshot {
         let ob = orig.bounds
-        var minX = ob.minX, minY = ob.minY, maxX = ob.maxX, maxY = ob.maxY
-        if [0, 2, 7].contains(handle) { minX = min(pt.x, maxX - 6) }        // 左边随动，右边固定
-        if [1, 3, 5].contains(handle) { maxX = max(pt.x, minX + 6) }        // 右边随动，左边固定
-        if [0, 1, 4].contains(handle) { minY = min(pt.y, maxY - 6) }        // 下边随动，上边固定
-        if [2, 3, 6].contains(handle) { maxY = max(pt.y, minY + 6) }        // 上边随动，下边固定
         var geom = orig
-        geom.bounds = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        if keepRatio, handle <= 3, ob.width > 0.5, ob.height > 0.5 {
+            let ratio = ob.width / ob.height
+            let anchor = NSPoint(x: (handle == 0 || handle == 2) ? ob.maxX : ob.minX,
+                                 y: (handle == 0 || handle == 1) ? ob.maxY : ob.minY)
+            let sx: CGFloat = (handle == 0 || handle == 2) ? -1 : 1   // 活动边相对锚点的方向
+            let sy: CGFloat = (handle == 0 || handle == 1) ? -1 : 1
+            let reqW = max((pt.x - anchor.x) * sx, 0)
+            let reqH = max((pt.y - anchor.y) * sy, 0)
+            let w = max(reqW, reqH * ratio, 6)
+            let h = w / ratio
+            geom.bounds = NSRect(x: min(anchor.x, anchor.x + sx * w),
+                                 y: min(anchor.y, anchor.y + sy * h), width: w, height: h)
+        } else {
+            var minX = ob.minX, minY = ob.minY, maxX = ob.maxX, maxY = ob.maxY
+            if [0, 2, 7].contains(handle) { minX = min(pt.x, maxX - 6) }        // 左边随动，右边固定
+            if [1, 3, 5].contains(handle) { maxX = max(pt.x, minX + 6) }        // 右边随动，左边固定
+            if [0, 1, 4].contains(handle) { minY = min(pt.y, maxY - 6) }        // 下边随动，上边固定
+            if [2, 3, 6].contains(handle) { maxY = max(pt.y, minY + 6) }        // 上边随动，下边固定
+            geom.bounds = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        }
         if orig.contentRect != nil {
             // 图案形状：contentRect 与 bounds 的内边距保持不变
             let padX = (orig.bounds.width - orig.contentRect!.width) / 2
@@ -2515,9 +2584,17 @@ final class AnnotationPDFView: PDFView {
         deselectAnnotation()
     }
 
-    /// Esc 取消选中；Delete/退格删除选中批注
+    /// Esc：优先取消绘制中手势（半途而废不留残影），其次取消选中；Delete/退格删除选中批注
     override func keyDown(with event: NSEvent) {
         let chars = event.charactersIgnoringModifiers ?? ""
+        if chars == "\u{1B}", startPt != nil, selMode == .none, activeTool != nil, activeTool != .eraser {
+            drawPage = nil
+            startPt = nil
+            currentPt = nil
+            penPoints = []
+            clearOverlay()
+            return
+        }
         if selectedAnno != nil {
             if chars == "\u{7F}" || chars == "\u{8}" { deleteSelected(); return }
             if chars == "\u{1B}" { deselectAnnotation(); return }
@@ -2537,6 +2614,14 @@ final class AnnotationPDFView: PDFView {
     private var ghostAnno: RotatableTextAnnotation?
     /// ghost 已提交（进撤销栈）；false 时 endTextInput 会把草稿从页面移除
     private var ghostCommitted = false
+    /// 双击编辑既有文本批注：非 nil 时 ghost 就是该批注本身（不新建草稿）
+    private var textEditTarget: RotatableTextAnnotation?
+    private var textEditBeforeGeom: AnnotationGeomSnapshot?
+    private var textEditBeforeText: String?
+    /// 编辑既有批注期间的旋转覆盖（settings 是 SwiftUI 只读直通，不能反向写；90/270 占地几何依赖它）
+    private var textRotationOverride: Double?
+    /// 生效旋转：编辑既有批注时用批注自身的旋转，其余用参数面板
+    private var textRot: Double { textRotationOverride ?? settings.textRotation }
 
     /// 按当前文字/字体/旋转计算弹框与最终放置矩形。
     /// 宽度随文字自适应（上限页宽 92%，超出换行）；90/270° 时放置矩形为旋转后占地。
@@ -2552,7 +2637,7 @@ final class AnnotationPDFView: PDFView {
                                   options: [.usesLineFragmentOrigin]).size
         let w = min(max(ceil(ts.width) + 10, 60), ceil(maxW))
         let h = max(ceil(ts.height) + 6, ceil(font.pointSize * 1.5))
-        let swap = Int(abs(settings.textRotation)) % 180 == 90
+        let swap = Int(abs(textRot)) % 180 == 90
         let pageRect: NSRect = swap
             ? NSRect(x: anchor.x - h / 2, y: anchor.y - w / 2, width: h, height: w)
             : NSRect(x: anchor.x, y: anchor.y - h, width: w, height: h)
@@ -2587,7 +2672,7 @@ final class AnnotationPDFView: PDFView {
         ghost.font = settings.textFont()
         ghost.fontColor = NSColor(settings.textColor)
         ghost.bgColor = settings.textBgColor.map { NSColor($0) }
-        ghost.textRotation = CGFloat(settings.textRotation)
+        ghost.textRotation = CGFloat(textRot)
         let geo = textGeometry(text: display, page: page, anchor: anchor)
         // 先给一个微差值再赋真值：bounds 值不变时 PDFKit 不失效，"a"→"b" 等宽替换就不会重绘
         ghost.bounds = geo.pageRect.insetBy(dx: -0.01, dy: -0.01)
@@ -2599,11 +2684,34 @@ final class AnnotationPDFView: PDFView {
         editor.textContainer?.containerSize = NSSize(width: geo.viewFrame.width + 200,
                                                      height: .greatestFiniteMagnitude)
         scaleEditorFont(editor, scale: geo.viewFrame.width / max(geo.pageRect.width, 1))
-        let swap = Int(abs(settings.textRotation)) % 180 == 90
-        editor.frameCenterRotation = swap ? CGFloat(settings.textRotation) : 0
+        let swap = Int(abs(textRot)) % 180 == 90
+        editor.frameCenterRotation = swap ? CGFloat(textRot) : 0
+        // 编辑既有批注时 ghost 在选中态：文字增减改了 bounds，选中框同步跟随
+        if selectedAnno === ghost { updateSelectionOverlay() }
     }
 
-    private func showTextInput(page: PDFPage, point: NSPoint, prefilled: String = "", existingRect: NSRect? = nil) {
+    /// 双击已有文本批注 → 原地重编辑：ghost 直接复用该批注对象，
+    /// 旋转沿用批注自身（textRotationOverride），提交记一条 textEdited 撤销
+    private func beginTextEdit(_ anno: PDFAnnotation, page: PDFPage) {
+        guard let t = anno as? RotatableTextAnnotation else { return }
+        commitTextInput()
+        selectedAnno = anno
+        selectedPage = page
+        updateSelectionOverlay()
+        textEditTarget = t
+        textEditBeforeGeom = AnnotationGeomSnapshot.capture(t)
+        textEditBeforeText = t.contents ?? ""
+        textRotationOverride = Double(t.textRotation)
+        // 锚点：未旋转 = 原框左上角（textGeometry 从锚点向下排）；90/270 = 中心
+        let b = t.bounds
+        let swap = Int(abs(t.textRotation)) % 180 == 90
+        let anchor = swap ? NSPoint(x: b.midX, y: b.midY) : NSPoint(x: b.minX, y: b.maxY)
+        showTextInput(page: page, point: anchor,
+                      prefilled: t.contents ?? "", existingRect: b, reuseGhost: t)
+    }
+
+    private func showTextInput(page: PDFPage, point: NSPoint, prefilled: String = "", existingRect: NSRect? = nil,
+                               reuseGhost: RotatableTextAnnotation? = nil) {
         commitTextInput()   // 已开着先提交
         textPopupAnchor = point
         let editor = GhostTextEditor.make()
@@ -2617,29 +2725,35 @@ final class AnnotationPDFView: PDFView {
         textPopup = editor
         textPopupPage = page
 
-        // ghost 草稿：立即挂到页面（空文本不画），之后每次键入实时刷新
-        let startRect = existingRect ?? textGeometry(text: prefilled, page: page, anchor: point).pageRect
-        let ghost = RotatableTextAnnotation(bounds: startRect, forType: .stamp, withProperties: nil)
-        ghost.contents = prefilled
-        ghost.font = settings.textFont()
-        ghost.fontColor = NSColor(settings.textColor)
-        ghost.color = .clear
-        ghost.bgColor = settings.textBgColor.map { NSColor($0) }
-        ghost.textRotation = CGFloat(settings.textRotation)
-        page.addAnnotation(ghost)
-        ghostAnno = ghost
-        ghostCommitted = false
+        // ghost 草稿：立即挂到页面（空文本不画），之后每次键入实时刷新；
+        // 双击编辑既有批注时直接复用该批注对象作 ghost（不新建），已提交标记防误删
+        if let g = reuseGhost {
+            ghostAnno = g
+            ghostCommitted = true
+        } else {
+            let startRect = existingRect ?? textGeometry(text: prefilled, page: page, anchor: point).pageRect
+            let ghost = RotatableTextAnnotation(bounds: startRect, forType: .stamp, withProperties: nil)
+            ghost.contents = prefilled
+            ghost.font = settings.textFont()
+            ghost.fontColor = NSColor(settings.textColor)
+            ghost.color = .clear
+            ghost.bgColor = settings.textBgColor.map { NSColor($0) }
+            ghost.textRotation = CGFloat(textRot)
+            page.addAnnotation(ghost)
+            ghostAnno = ghost
+            ghostCommitted = false
+        }
 
         if let existing = existingRect {
             // 编辑已有文本框：保持原占地
             textPopupRect = existing
             let foot = convert(existing, from: page)
-            let swap = Int(abs(settings.textRotation)) % 180 == 90
+            let swap = Int(abs(textRot)) % 180 == 90
             editor.frame = swap
                 ? NSRect(x: foot.midX - foot.height / 2, y: foot.midY - foot.width / 2,
                          width: foot.height, height: foot.width)
                 : foot
-            editor.frameCenterRotation = swap ? CGFloat(settings.textRotation) : 0
+            editor.frameCenterRotation = swap ? CGFloat(textRot) : 0
             let baseW = swap ? existing.height : existing.width
             scaleEditorFont(editor, scale: foot.width / max(baseW, 1))
         } else {
@@ -2666,15 +2780,41 @@ final class AnnotationPDFView: PDFView {
         }
     }
 
-    /// 提交：ghost 转正（已在页面上且已是最终状态），进撤销栈；空文本丢弃草稿
+    /// 提交：ghost 转正（已在页面上且已是最终状态），进撤销栈；空文本丢弃草稿。
+    /// 双击编辑既有批注：同一对象原地改字，记一条 textEdited 撤销（文字未变则还原几何）。
     @objc private func commitTextInput() {
         guard let ghost = ghostAnno, let page = textPopupPage, !ghostCommitted else { return }
+        let editing = textEditTarget
+        let beforeGeom = textEditBeforeGeom
+        let beforeText = textEditBeforeText
         let anchor = textPopupAnchor
         // 组字中途失焦提交：只取已上屏部分，组字串（拼音）不落纸
         let text = (textPopup?.committedText ?? (ghost.contents ?? ""))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         ghostCommitted = true
         endTextInput()
+        if let t = editing, ghost === t {
+            guard !text.isEmpty, text != beforeText else {
+                // 原文字还原（点击别处未改字 / 清空）：几何也回原样
+                if let bg = beforeGeom, let bt = beforeText {
+                    UndoCenter.applyTextSnapshot(t, geom: bg, text: bt)
+                }
+                return
+            }
+            t.contents = text
+            // ghost 边界是按含组字串的全量文字算的：提交前按最终文字重算一次（旋转沿用批注自身）
+            if let anchor {
+                let geo = textGeometry(text: text, page: page, anchor: anchor)
+                t.bounds = geo.pageRect.insetBy(dx: -0.01, dy: -0.01)
+                t.bounds = geo.pageRect
+            }
+            if let bg = beforeGeom, let bt = beforeText,
+               let idx = document.map({ $0.index(for: page) }) {
+                onTextEdited?(idx, t, bg, bt, AnnotationGeomSnapshot.capture(t), text)
+            }
+            if selectedAnno === t { updateSelectionOverlay() }
+            return
+        }
         guard !text.isEmpty else {
             page.removeAnnotation(ghost)   // 空文本：草稿不入撤销栈
             return
@@ -2697,10 +2837,21 @@ final class AnnotationPDFView: PDFView {
     private func endTextInput() {
         textPopup?.removeFromSuperview()
         textPopup = nil
-        if let ghost = ghostAnno, !ghostCommitted, let page = textPopupPage {
-            page.removeAnnotation(ghost)   // 取消/中断：草稿不入撤销栈
+        if let ghost = ghostAnno, !ghostCommitted {
+            if let t = textEditTarget, ghost === t {
+                // 编辑既有批注被取消（Esc/中断）：还原原文字与几何，绝不从页面移除原批注
+                if let bg = textEditBeforeGeom, let bt = textEditBeforeText {
+                    UndoCenter.applyTextSnapshot(t, geom: bg, text: bt)
+                }
+            } else if let page = textPopupPage {
+                page.removeAnnotation(ghost)   // 取消/中断：草稿不入撤销栈
+            }
         }
         ghostAnno = nil
+        textEditTarget = nil
+        textEditBeforeGeom = nil
+        textEditBeforeText = nil
+        textRotationOverride = nil
         textPopupPage = nil
         textPopupRect = nil
         textPopupAnchor = nil
@@ -2951,7 +3102,11 @@ final class AnnotationPDFView: PDFView {
 
         case .line, .arrow, .doubleArrow:
             guard hypot(b.x - a.x, b.y - a.y) > 3 else { return nil }
-            let rect = normalizedRect(a, b).insetBy(dx: -width - 6, dy: -width - 6)
+            // 箭头头长 ≈ 6 + 3×线宽（pdfcraft 同源公式）：bounds 必须把头部含进去，
+            // 否则线宽较大时箭头头被注记边界裁掉；纯直线只需线宽外扩（原 width+6 保守值保留）
+            let headLen: CGFloat = settings.shapeVariant == .line ? 0 : 6 + 3 * width
+            let pad = width + 6 + headLen
+            let rect = normalizedRect(a, b).insetBy(dx: -pad, dy: -pad)
             let l = PDFAnnotation(bounds: rect, forType: .line, withProperties: nil)
             // PDFKit 的 startPoint/endPoint 是相对注记 bounds 原点的坐标（不是页面空间）
             l.startPoint = NSPoint(x: a.x - rect.origin.x, y: a.y - rect.origin.y)

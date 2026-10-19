@@ -1059,6 +1059,19 @@ final class UndoCenter: ObservableObject {
         while undo(doc: doc, stamps: stamps), guardCount < 2000 { guardCount += 1 }
     }
 
+    /// 文本编辑回放（撤销/重做共用）：先设文字再套几何快照，
+    /// bounds 用「微差→真值」两段赋值强制 PDFKit 失效重绘（等值赋值不触发重绘的已知坑）
+    static func applyTextSnapshot(_ anno: PDFAnnotation, geom: AnnotationGeomSnapshot, text: String) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        anno.contents = text
+        geom.apply(to: anno)
+        let b = geom.bounds
+        anno.bounds = b.insetBy(dx: -0.01, dy: -0.01)
+        anno.bounds = b
+        CATransaction.commit()
+    }
+
     private func runAnnotationUndo(doc: DocumentStore, document: PDFDocument) -> Bool {
         guard let e = AnnotationUndoStack.shared.pop(document: document) else { return false }
         if let page = document.page(at: e.pageIndex) {
@@ -1072,6 +1085,8 @@ final class UndoCenter: ObservableObject {
                 for a in annos { page.removeAnnotation(a) }
             case .geometry(let anno, let before, _):
                 before.apply(to: anno)
+            case .textEdited(let anno, let beforeGeom, let beforeText, _, _):
+                UndoCenter.applyTextSnapshot(anno, geom: beforeGeom, text: beforeText)
             }
         }
         doc.isDirty = true
@@ -1093,6 +1108,8 @@ final class UndoCenter: ObservableObject {
                 for a in annos { page.addAnnotation(a) }
             case .geometry(let anno, _, let after):
                 after.apply(to: anno)
+            case .textEdited(let anno, _, _, let afterGeom, let afterText):
+                UndoCenter.applyTextSnapshot(anno, geom: afterGeom, text: afterText)
             }
         }
         doc.isDirty = true
