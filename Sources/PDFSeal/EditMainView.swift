@@ -1142,10 +1142,11 @@ extension NSView {
 // 真实文字由页面上的 ghost 草稿批注渲染（与最终落纸同一条 draw 路径）；
 // 本编辑器只负责收键盘、显示光标和输入法组字串：已上屏部分透明，组字部分正常显示。
 
-/// 临时 UITEST 开关：环境变量 MPDF_UITEST 或命令行参数 --uitest 均可触发
+/// 临时 UITEST 开关：环境变量 MPDF_UITEST 或命令行参数 --uitest / --probe 均可触发
 let uitestEnabled: Bool = {
-    ProcessInfo.processInfo.environment["MPDF_UITEST"] != nil
-        || ProcessInfo.processInfo.arguments.contains("--uitest")
+    let args = ProcessInfo.processInfo.arguments
+    return ProcessInfo.processInfo.environment["MPDF_UITEST"] != nil
+        || args.contains("--uitest") || args.contains("--probe")
 }()
 
 /// 临时 UITEST：直接写文件日志（open 启动时 stderr/统一日志都拿不到）
@@ -1799,6 +1800,212 @@ final class AnnotationPDFView: PDFView {
         }
     }
 
+    // MARK: - 临时探针：光标/滚动事件派发实证（--probe 触发，跑完自动退出）
+
+    static var probeLogging = false
+    static var probeMonitors: [Any] = []
+    private var probeDidDump = false
+    private var probeEventCount = 0
+
+    // MARK: 轻量黑匣子诊断（常开，环形缓冲，退出时落盘 /tmp/mpdf_diag.log）
+    static var diagLines: [String] = []
+    static var diagFlushed = 0
+    static var diagInstalled = false
+
+    static func diag(_ s: String) {
+        let line = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium) + " " + s
+        diagLines.append(line)
+        if diagLines.count >= 20 { flushDiag() }
+    }
+
+    static func flushDiag() {
+        guard !diagLines.isEmpty else { return }
+        diagFlushed += diagLines.count
+        let body = diagLines.joined(separator: "\n") + "\n"
+        diagLines.removeAll()
+        if let fh = FileHandle(forWritingAtPath: "/tmp/mpdf_diag.log") {
+            fh.seekToEndOfFile(); fh.write(body.data(using: .utf8)!); fh.closeFile()
+        } else {
+            try? "=== diag start ===\n".write(toFile: "/tmp/mpdf_diag.log", atomically: true, encoding: .utf8)
+            if let fh = FileHandle(forWritingAtPath: "/tmp/mpdf_diag.log") {
+                fh.seekToEndOfFile(); fh.write(body.data(using: .utf8)!); fh.closeFile()
+            }
+        }
+        if diagFlushed > 800 {   // 防止无限膨胀：超限后停写（保留文件可读）
+            diagLines = []
+        }
+    }
+
+    static func installDiag() {
+        guard !diagInstalled else { return }
+        diagInstalled = true
+        try? "=== diag start \(Date()) ===\n".write(toFile: "/tmp/mpdf_diag.log", atomically: true, encoding: .utf8)
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            flushDiag()
+        }
+    }
+
+    /// 真实环境被动探针：dump 真实窗口/层级 + 装事件流监视 + 造批注注入事件
+    private func passiveProbe(retries: Int) {
+        guard let w = window, !probeDidDump else {
+            if retries > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.passiveProbe(retries: retries - 1) } }
+            return
+        }
+        guard document != nil else {
+            uitestLog("[REAL] doc not ready yet, retries=%d", retries)
+            if retries > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.passiveProbe(retries: retries - 1) } }
+            return
+        }
+        probeDidDump = true
+        uitestLog("[REAL] === probe view=%d winTitle=%@ acceptsMouseMoved=%d enclosing=%@ inner=%@",
+                  Int(bitPattern: Unmanaged.passUnretained(self).toOpaque()),
+                  w.title ?? "?",
+                  w.acceptsMouseMovedEvents ? 1 : 0,
+                  enclosingScrollView.map { "\(type(of: $0))" } ?? "nil",
+                  innerScrollView().map { "\(type(of: $0))" } ?? "nil")
+        var tree: [String] = []
+        func walk(_ v: NSView, _ d: Int) {
+            guard d < 9, tree.count < 46 else { return }
+            tree.append("\(String(repeating: "  ", count: d))\(type(of: v)) f=\(NSStringFromRect(v.frame))")
+            for s in v.subviews { walk(s, d + 1) }
+        }
+        if let cv = w.contentView { walk(cv, 0) }
+        tree.forEach { uitestLog("[RTREE] %@", $0) }
+        // 造矩形批注并选中（模拟用户操作后的状态）
+        guard let doc = document, let page = doc.page(at: 0) else { return }
+        let b = page.bounds(for: .mediaBox)
+        let rect = NSRect(x: b.midX - 60, y: b.midY - 40, width: 120, height: 80)
+        let anno = PDFAnnotation(bounds: rect, forType: .square, withProperties: nil)
+        anno.color = .red
+        page.addAnnotation(anno)
+        selectedAnno = anno
+        selectedPage = page
+        updateSelectionOverlay()
+        uitestLog("[REAL] overlay=%@ handles=%d", overlayView.selectionRect.map(NSStringFromRect) ?? "nil",
+                  overlayView.selectionHandles.count)
+        // 事件流监视（真实鼠标事件也会进这里）
+        Self.probeMonitors.append(NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .scrollWheel, .magnify, .leftMouseDown]) { [weak self] ev in
+            guard let self, self.probeEventCount < 60 else { return ev }
+            self.probeEventCount += 1
+            uitestLog("[RMON] t=%d loc=%@ win=%@", ev.type.rawValue, NSStringFromPoint(ev.locationInWindow),
+                      ev.window?.title ?? "nil")
+            return ev
+        })
+        Self.probeLogging = true
+        // 注入：mouseMoved 到批注右下控制点 + scrollWheel
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, let w2 = self.window else { uitestLog("[REAL] window gone"); return }
+            let vr = self.convert(rect, from: page)
+            uitestLog("[REAL] annoViewRect=%@ selHandles=%@", NSStringFromRect(vr),
+                      self.overlayView.selectionHandles.map(NSStringFromRect).joined(separator: " | "))
+            // 用当前真实鼠标位置注入（坐标换算走 convertToScreen + 主屏高翻转，实测换算公式不可靠）
+            let ml = NSEvent.mouseLocation
+            let mainH = NSScreen.screens.first?.frame.maxY ?? ml.y
+            let cgPt = NSPoint(x: ml.x, y: mainH - ml.y)
+            if let cg = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: cgPt, mouseButton: .left),
+               let me = NSEvent(cgEvent: cg) {
+                uitestLog("[REAL] >>> inject mouseMoved at current mouse cgPt=%@ mouseLoc=%@", NSStringFromPoint(cgPt), NSStringFromPoint(ml))
+                w2.sendEvent(me)
+                uitestLog("[REAL] <<< locationInWindow=%@ mouseInView=%d",
+                          NSStringFromPoint(me.locationInWindow),
+                          self.bounds.contains(self.convert(me.locationInWindow, from: nil)) ? 1 : 0)
+            }
+            if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: -5, wheel2: 0, wheel3: 0),
+               let se = NSEvent(cgEvent: cg) {
+                uitestLog("[REAL] >>> inject scrollWheel")
+                w2.sendEvent(se)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self else { return }
+                let after = self.selectedAnno.map { NSStringFromRect(self.convert($0.bounds, from: self.selectedPage ?? page)) } ?? "nil"
+                uitestLog("[REAL] after: overlay=%@ annoView=%@",
+                          self.overlayView.selectionRect.map(NSStringFromRect) ?? "nil", after)
+                Self.probeLogging = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }
+            }
+        }
+    }
+
+    static func runCursorScrollProbe() {
+        guard let doc = PDFDocument(url: URL(fileURLWithPath: "/tmp/mpdf_test.pdf")) else {
+            uitestLog("[PROBE] cannot load /tmp/mpdf_test.pdf"); return
+        }
+        let v = AnnotationPDFView()
+        v.document = doc
+        let w = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 900, height: 700),
+                         styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        w.contentView = v
+        w.title = "PROBE"
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { v.probeStage() }
+    }
+
+    private func probeStage() {
+        guard let w = window, let doc = document, let page = doc.page(at: 0) else {
+            uitestLog("[PROBE] setup fail"); return
+        }
+        // 1) 环境与层级事实
+        uitestLog("[PROBE] acceptsMouseMoved=%d enclosing=%@ inner=%@",
+                  w.acceptsMouseMovedEvents ? 1 : 0,
+                  enclosingScrollView.map { "\(type(of: $0))" } ?? "nil",
+                  innerScrollView().map { "\(type(of: $0))" } ?? "nil")
+        var tree: [String] = []
+        func walk(_ view: NSView, _ d: Int) {
+            tree.append("\(String(repeating: "  ", count: d))\(type(of: view)) f=\(NSStringFromRect(view.frame))")
+            for s in view.subviews { walk(s, d + 1) }
+        }
+        walk(self, 0)
+        for l in tree.prefix(30) { uitestLog("[TREE] %@", l) }
+        // 2) 造一个矩形批注并选中
+        let b = page.bounds(for: .mediaBox)
+        let rect = NSRect(x: b.midX - 60, y: b.midY - 40, width: 120, height: 80)
+        let anno = PDFAnnotation(bounds: rect, forType: .square, withProperties: nil)
+        anno.color = .red
+        page.addAnnotation(anno)
+        selectedAnno = anno
+        selectedPage = page
+        updateSelectionOverlay()
+        uitestLog("[PROBE] overlay rect=%@ annoBounds=%@",
+                  overlayView.selectionRect.map(NSStringFromRect) ?? "nil", NSStringFromRect(anno.bounds))
+        // 3) 事件监视器：本地流里出现的每个相关事件记一行
+        Self.probeMonitors.append(NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .scrollWheel, .magnify, .leftMouseDown, .leftMouseDragged]) { ev in
+            uitestLog("[MON] rawType=%d loc=%@", ev.type.rawValue, NSStringFromPoint(ev.locationInWindow))
+            return ev
+        })
+        Self.probeLogging = true
+        // 4) 合成 mouseMoved（macOS 27 SDK 已移除 NSEvent 工厂方法 → CGEvent 构造，只创建不 post）
+        let vr = convert(rect, from: page)
+        uitestLog("[PROBE] anno viewRect=%@ hitTest=%@",
+                  NSStringFromRect(vr),
+                  hitTest(NSPoint(x: vr.midX, y: vr.midY)).map { "\(type(of: $0))" } ?? "nil")
+        let screenH = NSScreen.screens.first(where: { $0.frame.intersects(w.frame) })?.frame.height ?? 900
+        let cgPt = NSPoint(x: w.frame.midX, y: screenH - w.frame.midY)   // CG 全局坐标（左上原点）
+        if let cg = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: cgPt, mouseButton: .left),
+           let me = NSEvent(cgEvent: cg) {
+            uitestLog("[PROBE] >>> send mouseMoved (cgPt=%@)", NSStringFromPoint(cgPt))
+            w.sendEvent(me)
+            uitestLog("[PROBE] <<< locationInWindow=%@ type=%d", NSStringFromPoint(me.locationInWindow), me.type.rawValue)
+        } else { uitestLog("[PROBE] mouseEvent create FAIL") }
+        // 5) 合成 scrollWheel
+        if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: -5, wheel2: 0, wheel3: 0),
+           let se = NSEvent(cgEvent: cg) {
+            uitestLog("[PROBE] >>> send scrollWheel")
+            w.sendEvent(se)
+        } else { uitestLog("[PROBE] scrollWheel create FAIL") }
+        // 6) 汇总
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self else { return }
+            let after = self.selectedAnno.map { NSStringFromRect(self.convert($0.bounds, from: self.selectedPage ?? page)) } ?? "nil"
+            uitestLog("[PROBE] after: overlay=%@ annoViewRect=%@",
+                      self.overlayView.selectionRect.map(NSStringFromRect) ?? "nil", after)
+            Self.probeLogging = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
+        }
+    }
+
     override func layout() {
         super.layout()
         overlayView.frame = bounds
@@ -1848,6 +2055,8 @@ final class AnnotationPDFView: PDFView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        Self.installDiag()
+        Self.diag("view attach win=\(window != nil ? 1 : 0) acceptsMM=\(window?.acceptsMouseMovedEvents == true ? 1 : 0)")
         // ⭐ mouseMoved 派发开关必须在挂窗后设置：updateTrackingAreas 执行时 window 多半还是 nil，
         // 光标逻辑写在 mouseMoved 里却永远收不到事件（v2.9.2 悬停光标全失效真因）。
         window?.acceptsMouseMovedEvents = true
@@ -1855,6 +2064,12 @@ final class AnnotationPDFView: PDFView {
         if let obs = scrollObserver { NotificationCenter.default.removeObserver(obs); scrollObserver = nil }
         if let obs = zoomObserver { NotificationCenter.default.removeObserver(obs); zoomObserver = nil }
         attachScrollObserver()
+        // 真实环境被动探针（--probe）：等待文档加载后 dump + 注入事件
+        if ProcessInfo.processInfo.arguments.contains("--probe") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                self?.passiveProbe(retries: 3)
+            }
+        }
     }
 
     deinit {
@@ -1863,6 +2078,20 @@ final class AnnotationPDFView: PDFView {
     }
 
     private func canvasDidScroll() {
+        // 黑匣子：滚动跟随失准实测（overlay 框与批注实际位置偏差 >1.5pt 记一条）
+        if selectedAnno != nil, !overlayView.isHidden,
+           let page = selectedPage, page.annotations.contains(selectedAnno!) {
+            let want = convert(selectedAnno!.bounds, from: page)
+            if let got = overlayView.selectionRect, abs(got.origin.x - want.origin.x) > 1.5 || abs(got.origin.y - want.origin.y) > 1.5 {
+                Self.diag("SCROLL-MISMATCH want=\(NSStringFromRect(want)) got=\(NSStringFromRect(got))")
+            } else {
+                Self.diagScrollCount += 1
+                if Self.diagScrollCount % 25 == 0 {
+                    Self.diag("scroll#\(Self.diagScrollCount) ok")
+                }
+            }
+        }
+        if Self.probeLogging { uitestLog("[SCROLL] canvasDidScroll fired sel=%d", selectedAnno != nil ? 1 : 0) }
         if selectedAnno != nil { updateSelectionOverlay() }
         if textPopup != nil { syncGhostFromEditor() }
     }
@@ -1976,6 +2205,19 @@ final class AnnotationPDFView: PDFView {
     /// 同一视图内部移动不会触发 → 必须在 mouseMoved 里主动 set 光标，否则小手/十字卡在旧状态，
     /// 要等移出画布或切窗回来才刷新（用户实测的两处失效均由此而来）。
     override func mouseMoved(with event: NSEvent) {
+        Self.diagMMCount += 1
+        if Self.diagMMCount == 1 || Self.diagMMCount % 20 == 0 {
+            let p = convert(event.locationInWindow, from: nil)
+            var annoHit = -1
+            if activeTool == nil, let pg = page(for: p, nearest: true) {
+                annoHit = annotationAt(convert(p, to: pg), page: pg) != nil ? 1 : 0
+            }
+            Self.diag("mm#\(Self.diagMMCount) inB=\(bounds.contains(p) ? 1 : 0) handle=\(hoverHandleIndex(atView: p).map { String($0) } ?? "-") sel=\(selectedAnno != nil ? 1 : 0) annoHit=\(annoHit)")
+        }
+        if Self.probeLogging {
+            uitestLog("[MM] fired loc=%@ inBounds=%d", NSStringFromPoint(convert(event.locationInWindow, from: nil)),
+                      bounds.contains(convert(event.locationInWindow, from: nil)) ? 1 : 0)
+        }
         // 只处理画布范围内的事件（跟踪区已限 bounds，双保险；拖拽中例外）
         let vp = convert(event.locationInWindow, from: nil)
         guard bounds.contains(vp) || selMode != .none else {
@@ -1990,7 +2232,16 @@ final class AnnotationPDFView: PDFView {
         super.mouseMoved(with: event)
     }
 
+    static var diagMMCount = 0
+    static var diagCUCount = 0
+    static var diagScrollCount = 0
+
     override func cursorUpdate(with event: NSEvent) {
+        Self.diagCUCount += 1
+        if Self.diagCUCount == 1 || Self.diagCUCount % 30 == 0 {
+            Self.diag("cu#\(Self.diagCUCount)")
+        }
+        if Self.probeLogging { uitestLog("[CU] cursorUpdate fired") }
         // 边界守卫：光标在画布外（顶栏/面板）时交给其他视图/按钮的光标逻辑
         guard bounds.contains(convert(event.locationInWindow, from: nil)) else {
             super.cursorUpdate(with: event)
@@ -2001,6 +2252,13 @@ final class AnnotationPDFView: PDFView {
 
     /// 按当前位置统一计算光标（cursorUpdate / mouseMoved / mouseUp 共用）
     private func updateCursor(at event: NSEvent) {
+        if Self.probeLogging {
+            let p = convert(event.locationInWindow, from: nil)
+            uitestLog("[CURSOR] enter vp=%@ handle=%@ tool=%@ sel=%d",
+                      NSStringFromPoint(p),
+                      hoverHandleIndex(atView: p).map { "\($0)" } ?? "nil",
+                      activeTool.map { "\($0)" } ?? "nil", selectedAnno != nil ? 1 : 0)
+        }
         // 选中批注可能已被撤销/橡皮擦删除（不经过本视图）：发现即收起选中框
         if let anno = selectedAnno, let page = selectedPage, !page.annotations.contains(anno) {
             deselectAnnotation()

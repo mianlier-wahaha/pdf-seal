@@ -18,7 +18,8 @@ struct ContentView: View {
     @EnvironmentObject private var settings: StampSettings
     @EnvironmentObject private var workspace: Workspace
 
-    @State private var entry: MainEntry = .preview
+    // 临时探针：--probe 启动直接进编辑页（真实环境事件派发实证用）
+    @State private var entry: MainEntry = ProcessInfo.processInfo.arguments.contains("--probe") ? .edit : .preview
     @State private var statusText: String?
     @State private var errorText: String?
     @State private var exportTool: ExportToolKind?

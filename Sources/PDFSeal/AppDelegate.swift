@@ -36,6 +36,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 AnnotationPDFView.runUITestHarness()
             }
         }
+        // 临时探针：真实环境事件派发实证（自动开 PDF → 编辑页 → 被动探针）
+        if ProcessInfo.processInfo.arguments.contains("--probe") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                if let pdf = ProcessInfo.processInfo.arguments.first(where: { $0.hasSuffix(".pdf") }) {
+                    MainActor.assumeIsolated { self.openDocument(at: URL(fileURLWithPath: pdf)) }
+                }
+            }
+        }
+        // 临时探针：裸窗口基准 bench
+        if ProcessInfo.processInfo.arguments.contains("--probebench") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                AnnotationPDFView.runCursorScrollProbe()
+            }
+        }
     }
 
     private func installIfNeeded() {
