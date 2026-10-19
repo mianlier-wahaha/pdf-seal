@@ -849,7 +849,9 @@ struct EditMainView: View {
     private var hintText: String {
         switch tool {
         case .pen: return L("在页面上按住拖动进行书写")
-        case .highlight, .shape: return L("选择工具后在页面上拖动绘制")
+        case .highlight: return L("划选文字即可精准高亮；扫描版页面请拖动绘制")
+        case .underline, .strikeOut: return L("划选文字即可沿线精准批注；扫描版页面请拖动绘制")
+        case .shape: return L("选择工具后在页面上拖动绘制")
         case .eraser: return L("点击或拖过要删除的批注")
         case .textBox: return L("点击页面位置，在弹出的输入框中输入，回车放置")
         default: return L("选择工具后在页面上拖动绘制")
@@ -941,6 +943,8 @@ enum AnnotationUndoAction {
     /// 复合动作：橡皮擦「只擦除触及部分」把一条笔迹替换为若干段。
     /// 撤销 = 移除所有分段、恢复原笔迹；重做反之。单条记录，避免撤销时看到中间态。
     case replaced(original: PDFAnnotation, pieces: [PDFAnnotation])
+    /// 复合新增（文字感知批注一次划选落多行）：撤销 = 一次移除全部，重做 = 一次重加
+    case addedBatch([PDFAnnotation])
     /// 几何改动（选中后移动/缩放/旋转）：撤销还原 before 快照，重做套用 after 快照
     case geometry(PDFAnnotation, before: AnnotationGeomSnapshot, after: AnnotationGeomSnapshot)
 }
@@ -1130,27 +1134,129 @@ extension NSView {
     }
 }
 
-// MARK: - 文本输入弹框（回车提交 / Esc 取消 / 失焦提交）
+// MARK: - Ghost 文字编辑器（所见即所得）
+//
+// 真实文字由页面上的 ghost 草稿批注渲染（与最终落纸同一条 draw 路径）；
+// 本编辑器只负责收键盘、显示光标和输入法组字串：已上屏部分透明，组字部分正常显示。
 
-final class CommitTextField: NSTextField {
+/// 临时 UITEST 开关：环境变量 MPDF_UITEST 或命令行参数 --uitest 均可触发
+let uitestEnabled: Bool = {
+    ProcessInfo.processInfo.environment["MPDF_UITEST"] != nil
+        || ProcessInfo.processInfo.arguments.contains("--uitest")
+}()
+
+/// 临时 UITEST：直接写文件日志（open 启动时 stderr/统一日志都拿不到）
+func uitestLog(_ fmt: String, _ args: CVarArg...) {
+    guard uitestEnabled else { return }
+    let msg = String(format: fmt, arguments: args)
+    let line = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium) + " " + msg + "\n"
+    if let fh = FileHandle(forWritingAtPath: "/tmp/mpdf_uitest.log") {
+        fh.seekToEndOfFile(); fh.write(line.data(using: .utf8)!); fh.closeFile()
+    } else {
+        try? line.write(toFile: "/tmp/mpdf_uitest.log", atomically: true, encoding: .utf8)
+    }
+}
+
+final class GhostTextEditor: NSTextView {
     var onCommit: (() -> Void)?
     var onCancel: (() -> Void)?
-    var onTextChanged: ((String) -> Void)?
-
-    /// 输入内容变化：通知外层按文字宽度自适应弹框
-    override func textDidChange(_ notification: Notification) {
-        super.textDidChange(notification)
-        onTextChanged?(stringValue)
+    /// 文字变化回调（每次键入/组字变化都会触发）
+    var onTextChanged: (() -> Void)?
+    /// 已上屏文字透明；组字串用这个颜色显示（与最终文字同色）
+    var inkColor: NSColor = .black {
+        didSet { refreshAttributes() }
     }
 
+    /// 工厂构造：macOS 27 新文本栈下，子类自定义 init 调 super.init(frame:) 会崩溃、
+    /// super.init(frame:textContainer: nil) 会让内容存储脱钩（打字全丢），
+    /// 唯一可用路径＝继承的 init(frame:) + 构造后逐项配置
+    static func make() -> GhostTextEditor {
+        let e = GhostTextEditor(frame: NSRect(x: 0, y: 0, width: 220, height: 28))
+        e.drawsBackground = false
+        e.isRichText = true
+        e.allowsUndo = true
+        e.isAutomaticQuoteSubstitutionEnabled = false
+        e.isAutomaticDashSubstitutionEnabled = false
+        e.isAutomaticTextReplacementEnabled = false
+        e.isAutomaticLinkDetectionEnabled = false
+        e.insertionPointColor = .controlAccentColor
+        // 内边距与 ghost 绘制的 3pt 一致，光标位置尽量贴近纸上文字
+        e.textContainerInset = NSSize(width: 3, height: 3)
+        // ghost 用 NSStringDrawing（无行首内边距）：归零对齐，否则光标恒比字形右偏 5pt
+        e.textContainer?.lineFragmentPadding = 0
+        return e
+    }
+
+    /// 已上屏文字（剔除输入法预编辑串）
+    var committedText: String {
+        let ns = string as NSString
+        let mr = markedRange()
+        guard mr.length > 0, NSIntersectionRange(NSRange(location: 0, length: ns.length), mr).length == mr.length else {
+            return string
+        }
+        return ns.replacingCharacters(in: mr, with: "")
+    }
+
+    private var markedString: String? {
+        let mr = markedRange()
+        guard mr.length > 0 else { return nil }
+        return (string as NSString).substring(with: mr)
+    }
+
+    /// 浮层文字全部透明（含组字串）——渲染完全交给 ghost，浮层只留光标；
+    /// 字体全段统一（影响光标高度与布局）
+    func refreshAttributes() {
+        let f = font ?? .systemFont(ofSize: 14)
+        let ns = string as NSString
+        typingAttributes = [.font: f, .foregroundColor: NSColor.clear]
+        guard ns.length > 0 else { return }
+        textStorage?.beginEditing()
+        textStorage?.addAttributes([.font: f, .foregroundColor: NSColor.clear],
+                                   range: NSRange(location: 0, length: ns.length))
+        textStorage?.endEditing()
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        if uitestEnabled {
+            uitestLog("[UITEST] editor didChangeText string=%@ marked=%d", string, markedRange().length)
+        }
+        refreshAttributes()
+        onTextChanged?()
+    }
+
+    // 单行输入：回车提交，不换行
+    override func insertNewline(_ sender: Any?) {
+        if uitestEnabled {
+            uitestLog("[UITEST] editor insertNewline (commit)")
+        }
+        onCommit?()
+    }
+
+    // Esc 取消（key binding 的 cancelOperation: 最终落到这里）
     override func cancelOperation(_ sender: Any?) {
+        if uitestEnabled {
+            uitestLog("[UITEST] editor cancelOperation")
+        }
         onCancel?()
     }
 
-    // 失焦（点击别处）时 textDidEndEditing 走 action 路径提交
-    override func textDidEndEditing(_ notification: Notification) {
-        super.textDidEndEditing(notification)
-        onCommit?()
+    // 点击别处失焦 = 提交
+    override func resignFirstResponder() -> Bool {
+        let ok = super.resignFirstResponder()
+        if uitestEnabled {
+            uitestLog("[UITEST] editor resignFirstResponder ok=%d", ok ? 1 : 0)
+        }
+        if ok { onCommit?() }
+        return ok
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if uitestEnabled {
+            uitestLog("[UITEST] editor becomeFirstResponder ok=%d inWindow=%d", ok ? 1 : 0, window != nil ? 1 : 0)
+        }
+        return ok
     }
 }
 
@@ -1238,6 +1344,7 @@ final class RotatableTextAnnotation: PDFAnnotation {
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
         let text = contents ?? ""
+        guard !text.isEmpty else { return }   // ghost 草稿空文本不画任何东西
         let swap = Int(abs(textRotation)) % 180 == 90
         // 文本块尺寸：90/270 旋转时与 bounds 宽高互换（bounds 已按旋转后的占地创建，避免 BBox 裁剪）
         let w = swap ? bounds.height : bounds.width
@@ -1545,6 +1652,13 @@ struct AnnotationPageView: NSViewRepresentable {
             doc.hasAnnotationEdits = true
             onAdded()
         }
+        v.onAddBatch = { pageIdx, annos in
+            // 一次划选落多行 = 单条撤销记录（⌘Z 一次全撤）
+            AnnotationUndoStack.shared.push(document: doc.document!, pageIndex: pageIdx, action: .addedBatch(annos))
+            doc.isDirty = true
+            doc.hasAnnotationEdits = true
+            onAdded()
+        }
         v.onGeometryEdited = {
             doc.isDirty = true
             doc.hasAnnotationEdits = true
@@ -1590,6 +1704,8 @@ final class AnnotationPDFView: PDFView {
     var onRemoveAnnotation: ((Int, PDFAnnotation) -> Void)? = nil
     /// 复合擦除（部分擦除切分笔迹）：单条撤销记录，避免撤销时看到中间态
     var onCompositeErase: ((Int, PDFAnnotation, [PDFAnnotation]) -> Void)? = nil
+    /// 复合新增（文字感知批注一次划选落多行）：单条撤销记录
+    var onAddBatch: ((Int, [PDFAnnotation]) -> Void)? = nil
     /// 选中态几何改动（移动/缩放/旋转）完成：仅刷脏标记，撤销记录由交互结束处统一入栈
     var onGeometryEdited: (() -> Void)? = nil
 
@@ -1603,6 +1719,11 @@ final class AnnotationPDFView: PDFView {
     private var startPt: NSPoint?
     private var currentPt: NSPoint?
     private var penPoints: [NSPoint] = []       // 手绘笔采集的页面坐标点列
+    /// 文字感知批注进行中：拖动交给 PDFView 原生选字，mouseUp 收割选中行落批注
+    private var textSelecting = false
+    /// 页面文字层探测缓存（page.string 全页取词有成本，mouseMoved 高频调用需要）
+    private weak var textProbePage: PDFPage?
+    private var textProbeResult = false
 
     // MARK: 批注选中状态（浏览模式全选；工具激活时仅本工具画的同类批注可选）
     private enum SelectionMode { case none, moving, resizing, resizingLine, rotating }
@@ -1624,9 +1745,77 @@ final class AnnotationPDFView: PDFView {
         return v
     }()
 
+    /// 临时 UITEST：独立窗口 harness（定位打字问题用，绕开 SwiftUI 标签页）
+    static func runUITestHarness() {
+        guard let doc = PDFDocument(url: URL(fileURLWithPath: "/tmp/mpdf_test.pdf")) else {
+            uitestLog("[UITEST] harness: cannot load test pdf"); return
+        }
+        let v = AnnotationPDFView()
+        v.document = doc
+        let w = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 900, height: 700),
+                         styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        w.contentView = v
+        w.title = "UITEST"
+        w.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        v.activeTool = .textBox
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            let page = doc.page(at: 0)!
+            let b = page.bounds(for: .mediaBox)
+            uitestLog("[UITEST] harness: calling showTextInput")
+            v.showTextInput(page: page, point: NSPoint(x: b.midX, y: b.midY - 80))
+            // 再延迟 1.2s：程序化打字 + 提交全链路验证
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                guard let ed = v.textPopup else {
+                    uitestLog("[UITEST] typing: editor gone"); return
+                }
+                ed.string = "abc"
+                ed.insertText("X", replacementRange: NSRange(location: (ed.string as NSString).length, length: 0))
+                uitestLog("[UITEST] typed: string=%@", ed.string)
+                // 2s 后提交并落盘检查
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    v.commitTextInput()
+                    let out = PDFDocument()
+                    if let d2 = v.document, let p = d2.page(at: 0) { out.insert(p, at: 0) }
+                    let url = URL(fileURLWithPath: "/tmp/mpdf_uitest_out.pdf")
+                    out.write(to: url)
+                    uitestLog("[UITEST] harness: committed and wrote output")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }
+                }
+            }
+        }
+    }
+
     override func layout() {
         super.layout()
         overlayView.frame = bounds
+        attachScrollObserver()
+    }
+
+    // MARK: 滚动跟随（选中框 / ghost 编辑器与页面同步）
+
+    private var scrollObserver: NSObjectProtocol?
+
+    /// 滚动视图 bounds 变化（滚动/缩放）→ 重算选中框与编辑器位置。
+    /// 不监听的话 overlay 画在视图空间的旧位置上，页面一动定位框就与图形分离。
+    private func attachScrollObserver() {
+        if scrollObserver != nil { return }
+        guard let clip = enclosingScrollView?.contentView else { return }
+        clip.postsBoundsChangedNotifications = true
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: clip, queue: .main
+        ) { [weak self] _ in
+            self?.canvasDidScroll()
+        }
+    }
+
+    deinit {
+        if let obs = scrollObserver { NotificationCenter.default.removeObserver(obs) }
+    }
+
+    private func canvasDidScroll() {
+        if selectedAnno != nil { updateSelectionOverlay() }
+        if textPopup != nil { syncGhostFromEditor() }
     }
 
     func clearOverlay() {
@@ -1723,12 +1912,12 @@ final class AnnotationPDFView: PDFView {
         for ta in trackingAreas where ta.owner === self {
             removeTrackingArea(ta)
         }
-        // ⚠️ 必须用 bounds 而非 .infinite：NSTrackingArea 不裁剪到视图边界，
-        // 无限矩形覆盖整个窗口 → mouseMoved/cursorUpdate 在顶栏/面板上也会触发，
-        // updateCursor 每步强制 set 十字/箭头，把控制区按钮 onHover 设的小手立刻覆盖掉。
-        // 用 bounds（视图 layout 变化时系统会重新调 updateTrackingAreas）。
-        addTrackingArea(NSTrackingArea(rect: bounds,
-                                       options: [.cursorUpdate, .mouseMoved, .activeInKeyWindow],
+        // ⚠️ 不能用 .infinite（覆盖整个窗口，顶栏/按钮光标被强制覆盖）；
+        // 也不能用固定 rect: bounds —— PDF 在滚动视图内滚动时 bounds 原点移动，
+        // 固定矩形会整体错出可视区，鼠标挪回画布后 mouseMoved 断供 → 光标卡死、悬停小手/控制点箭头全失效。
+        // .inVisibleRect 由系统动态跟随可视区（自动裁剪到画布，不外溢到顶栏/面板），两难全解。
+        addTrackingArea(NSTrackingArea(rect: .zero,
+                                       options: [.inVisibleRect, .cursorUpdate, .mouseMoved, .activeInKeyWindow],
                                        owner: self, userInfo: nil))
         // NSWindow 默认不派发 mouseMoved；不开则 mouseMoved 内的光标切换完全失效
         window?.acceptsMouseMovedEvents = true
@@ -1763,6 +1952,10 @@ final class AnnotationPDFView: PDFView {
 
     /// 按当前位置统一计算光标（cursorUpdate / mouseMoved / mouseUp 共用）
     private func updateCursor(at event: NSEvent) {
+        // 选中批注可能已被撤销/橡皮擦删除（不经过本视图）：发现即收起选中框
+        if let anno = selectedAnno, let page = selectedPage, !page.annotations.contains(anno) {
+            deselectAnnotation()
+        }
         // 选中态：光标悬停缩放控制点 → 对应方向的缩放双箭头（四角斜 45°、边中点垂直于边）
         if let h = hoverHandleIndex(atView: convert(event.locationInWindow, from: nil)) {
             switch h {
@@ -1791,6 +1984,8 @@ final class AnnotationPDFView: PDFView {
             }
             if t == .textBox {
                 NSCursor.iBeam.set()    // 文本工具空白处 = 可输入
+            } else if toolSupportsTextMarkup, let page = hitPage(event), pageHasText(page) {
+                NSCursor.iBeam.set()    // 高亮/下划线/删除线在文字层页面 = 可划选文字
             } else {
                 NSCursor.crosshair.set()
             }
@@ -1906,6 +2101,13 @@ final class AnnotationPDFView: PDFView {
         }, fallbackToSuper: false) {
             return
         }
+        // 文字感知批注：高亮/下划线/删除线在文字层页面上改走 PDFView 原生划选，
+        // mouseUp 按选中行逐行精准落批注（严格贴合字形和行）；扫描版（无文字层）仍走自绘
+        if toolSupportsTextMarkup, pageHasText(page) {
+            textSelecting = true
+            super.mouseDown(with: event)
+            return
+        }
         // 空白处：取消选中并开始绘制新批注
         drawPage = page
         startPt = pt
@@ -1920,6 +2122,10 @@ final class AnnotationPDFView: PDFView {
     override func mouseDragged(with event: NSEvent) {
         if selMode != .none {
             selectionDragged(event)
+            return
+        }
+        if textSelecting {
+            super.mouseDragged(with: event)   // PDFView 原生文字选择
             return
         }
         guard activeTool != nil, let page = drawPage else {
@@ -1942,6 +2148,12 @@ final class AnnotationPDFView: PDFView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if textSelecting {
+            textSelecting = false
+            super.mouseUp(with: event)
+            harvestTextSelection()
+            return
+        }
         if selMode != .none || (activeTool == nil && selectedAnno != nil) {
             selectionMouseUp()
             super.mouseUp(with: event)
@@ -2095,7 +2307,11 @@ final class AnnotationPDFView: PDFView {
     }
 
     private func updateSelectionOverlay() {
-        guard let anno = selectedAnno, let page = selectedPage else { deselectAnnotation(); return }
+        // 批注可能已被其他路径删除（撤销/重做/橡皮擦）：页面里已不存在 → 立即收起选中框
+        guard let anno = selectedAnno, let page = selectedPage, page.annotations.contains(anno) else {
+            deselectAnnotation()
+            return
+        }
         let r = convert(anno.bounds, from: page)
         overlayView.isHidden = false
         overlayView.previewRect = nil
@@ -2313,10 +2529,14 @@ final class AnnotationPDFView: PDFView {
 
     // MARK: 文本输入弹框（点击页面位置弹出，回车放置；弹框即最终效果实时预览）
 
-    private var textPopup: CommitTextField?
+    private var textPopup: GhostTextEditor?
     private var textPopupPage: PDFPage?
     private var textPopupRect: NSRect?    // 页面空间放置矩形（随文字宽度/旋转实时更新）
     private var textPopupAnchor: NSPoint? // 页面空间点击锚点
+    /// ghost 草稿批注：输入期间挂在页面上，用最终 draw 路径实时渲染（所见即所得）
+    private var ghostAnno: RotatableTextAnnotation?
+    /// ghost 已提交（进撤销栈）；false 时 endTextInput 会把草稿从页面移除
+    private var ghostCommitted = false
 
     /// 按当前文字/字体/旋转计算弹框与最终放置矩形。
     /// 宽度随文字自适应（上限页宽 92%，超出换行）；90/270° 时放置矩形为旋转后占地。
@@ -2344,63 +2564,129 @@ final class AnnotationPDFView: PDFView {
         return (pageRect, viewFrame)
     }
 
-    /// 把弹框（含旋转/字体/尺寸）套用到当前锚点与文字
-    private func applyTextPopupGeometry() {
-        guard let tf = textPopup, let page = textPopupPage, let anchor = textPopupAnchor else { return }
-        let geo = textGeometry(text: tf.stringValue, page: page, anchor: anchor)
+    /// 光标与 ghost 字形对齐的关键：ghost 按页面空间渲染后再被 PDFView 缩放显示，
+    /// 浮层在视图空间排版——字号/内边距必须乘「页面→视图」缩放比，否则缩放≠100% 时
+    /// 每个字符的推进宽度与字形不一致（光标不跟字符走）。
+    private func scaleEditorFont(_ editor: GhostTextEditor, scale: CGFloat) {
+        let f = settings.textFont()
+        guard scale > 0.01, scale.isFinite else { return }
+        editor.font = NSFont(descriptor: f.fontDescriptor, size: f.pointSize * scale) ?? f
+        editor.textContainerInset = NSSize(width: 3 * scale, height: 3 * scale)
+        editor.refreshAttributes()
+    }
+
+    /// 编辑器文字 → ghost 批注 + 浮层定位（每次键入/组字/参数变化都会调用）。
+    /// ghost 渲染**全量文字（含组字串）**——唯一渲染通道，真·所见即所得；
+    /// 浮层彻底隐形（文字全透明），只负责光标和收键盘。
+    private func syncGhostFromEditor() {
+        guard let editor = textPopup, let page = textPopupPage, let ghost = ghostAnno, let anchor = textPopupAnchor else { return }
+        let display = editor.string
+
+        // ghost：最终渲染路径（字体/颜色/背景/旋转与提交后的正式批注完全一致）
+        ghost.contents = display
+        ghost.font = settings.textFont()
+        ghost.fontColor = NSColor(settings.textColor)
+        ghost.bgColor = settings.textBgColor.map { NSColor($0) }
+        ghost.textRotation = CGFloat(settings.textRotation)
+        let geo = textGeometry(text: display, page: page, anchor: anchor)
+        // 先给一个微差值再赋真值：bounds 值不变时 PDFKit 不失效，"a"→"b" 等宽替换就不会重绘
+        ghost.bounds = geo.pageRect.insetBy(dx: -0.01, dy: -0.01)
+        ghost.bounds = geo.pageRect
+
+        // 浮层：同一几何定位；容器加宽防组字串换行（文字透明，宽了无副作用）
         textPopupRect = geo.pageRect
-        tf.frame = geo.viewFrame
+        editor.frame = geo.viewFrame
+        editor.textContainer?.containerSize = NSSize(width: geo.viewFrame.width + 200,
+                                                     height: .greatestFiniteMagnitude)
+        scaleEditorFont(editor, scale: geo.viewFrame.width / max(geo.pageRect.width, 1))
         let swap = Int(abs(settings.textRotation)) % 180 == 90
-        tf.frameCenterRotation = swap ? CGFloat(settings.textRotation) : 0
+        editor.frameCenterRotation = swap ? CGFloat(settings.textRotation) : 0
     }
 
     private func showTextInput(page: PDFPage, point: NSPoint, prefilled: String = "", existingRect: NSRect? = nil) {
         commitTextInput()   // 已开着先提交
         textPopupAnchor = point
-        let tf = CommitTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 28))
-        // 输入框文字大小/颜色与最终放置效果一致（实时预览）
-        tf.font = settings.textFont()
-        tf.textColor = NSColor(settings.textColor)
-        tf.stringValue = prefilled
-        tf.onCommit = { [weak self] in self?.commitTextInput() }
-        tf.onCancel = { [weak self] in self?.cancelTextInput() }
-        tf.onTextChanged = { [weak self] _ in self?.applyTextPopupGeometry() }   // 宽度随输入自适应
-        addSubview(tf)
-        textPopup = tf
+        let editor = GhostTextEditor.make()
+        editor.font = settings.textFont()
+        editor.inkColor = NSColor(settings.textColor)
+        editor.string = prefilled
+        editor.onCommit = { [weak self] in self?.commitTextInput() }
+        editor.onCancel = { [weak self] in self?.cancelTextInput() }
+        editor.onTextChanged = { [weak self] in self?.syncGhostFromEditor() }
+        addSubview(editor)
+        textPopup = editor
         textPopupPage = page
+
+        // ghost 草稿：立即挂到页面（空文本不画），之后每次键入实时刷新
+        let startRect = existingRect ?? textGeometry(text: prefilled, page: page, anchor: point).pageRect
+        let ghost = RotatableTextAnnotation(bounds: startRect, forType: .stamp, withProperties: nil)
+        ghost.contents = prefilled
+        ghost.font = settings.textFont()
+        ghost.fontColor = NSColor(settings.textColor)
+        ghost.color = .clear
+        ghost.bgColor = settings.textBgColor.map { NSColor($0) }
+        ghost.textRotation = CGFloat(settings.textRotation)
+        page.addAnnotation(ghost)
+        ghostAnno = ghost
+        ghostCommitted = false
+
         if let existing = existingRect {
             // 编辑已有文本框：保持原占地
             textPopupRect = existing
             let foot = convert(existing, from: page)
             let swap = Int(abs(settings.textRotation)) % 180 == 90
-            tf.frame = swap
+            editor.frame = swap
                 ? NSRect(x: foot.midX - foot.height / 2, y: foot.midY - foot.width / 2,
                          width: foot.height, height: foot.width)
                 : foot
-            tf.frameCenterRotation = swap ? CGFloat(settings.textRotation) : 0
+            editor.frameCenterRotation = swap ? CGFloat(settings.textRotation) : 0
+            let baseW = swap ? existing.height : existing.width
+            scaleEditorFont(editor, scale: foot.width / max(baseW, 1))
         } else {
-            applyTextPopupGeometry()
+            syncGhostFromEditor()
         }
-        window?.makeFirstResponder(tf)
+        let frOK = window?.makeFirstResponder(editor) ?? false
+        let first = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
+        if uitestEnabled {
+            uitestLog("[UITEST] showTextInput: editor.frame=%@ makeFirstResponder=%@ firstResponder=%@",
+                  NSStringFromRect(editor.frame), frOK ? "OK" : "FAIL", first)
+        }
+        // 临时 UITEST 钩子：状态 dump（定位打字问题用）
+        if uitestEnabled {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                if let ed = self.textPopup {
+                    uitestLog("[UITEST] dump: isEditable=%d isSelectable=%d hasWindow=%d isFR=%d font=%@",
+                              ed.isEditable ? 1 : 0, ed.isSelectable ? 1 : 0,
+                              ed.window != nil ? 1 : 0,
+                              ed.window?.firstResponder === ed ? 1 : 0,
+                              ed.font.map { String(describing: $0) } ?? "nil")
+                    uitestLog("[UITEST] dump: initial string=%@ len=%d", ed.string, (ed.string as NSString).length)
+                }
+            }
+        }
     }
 
+    /// 提交：ghost 转正（已在页面上且已是最终状态），进撤销栈；空文本丢弃草稿
     @objc private func commitTextInput() {
-        guard let tf = textPopup, let page = textPopupPage, let rect = textPopupRect else { return }
-        let text = tf.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let ghost = ghostAnno, let page = textPopupPage, !ghostCommitted else { return }
+        let anchor = textPopupAnchor
+        // 组字中途失焦提交：只取已上屏部分，组字串（拼音）不落纸
+        let text = (textPopup?.committedText ?? (ghost.contents ?? ""))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        ghostCommitted = true
         endTextInput()
-        guard !text.isEmpty else { return }
-        // 用 .stamp 类型强制 PDFKit 走自绘外观流：旋转/背景色/字体全部生效
-        // （FreeText 类型 PDFKit 用原生渲染，自绘 draw 与旋转/背景不生效）
-        let anno = RotatableTextAnnotation(bounds: rect, forType: .stamp, withProperties: nil)
-        anno.contents = text
-        anno.font = settings.textFont()
-        anno.fontColor = NSColor(settings.textColor)
-        anno.color = .clear
-        anno.bgColor = settings.textBgColor.map { NSColor($0) }
-        anno.textRotation = CGFloat(settings.textRotation)
-        page.addAnnotation(anno)
+        guard !text.isEmpty else {
+            page.removeAnnotation(ghost)   // 空文本：草稿不入撤销栈
+            return
+        }
+        ghost.contents = text
+        // ghost 边界是按含组字串的全量文字算的：提交前按最终文字重算一次
+        if let anchor {
+            let geo = textGeometry(text: text, page: page, anchor: anchor)
+            ghost.bounds = geo.pageRect
+        }
         if let idx = document.map({ $0.index(for: page) }) {
-            onAddAnnotation?(idx, anno)
+            onAddAnnotation?(idx, ghost)
         }
     }
 
@@ -2411,32 +2697,115 @@ final class AnnotationPDFView: PDFView {
     private func endTextInput() {
         textPopup?.removeFromSuperview()
         textPopup = nil
+        if let ghost = ghostAnno, !ghostCommitted, let page = textPopupPage {
+            page.removeAnnotation(ghost)   // 取消/中断：草稿不入撤销栈
+        }
+        ghostAnno = nil
         textPopupPage = nil
         textPopupRect = nil
         textPopupAnchor = nil
         window?.makeFirstResponder(self)
     }
 
-    /// 文本输入弹框开着时，参数（字体/字号/颜色/旋转）变化即时反映到输入框（实时预览）。
-    /// 正在输入时文字由 field editor 渲染：editor.font 赋值只作用于选中区，
-    /// 必须全选→套用→恢复选区，才能让已有文字的字号/字体实时变化。
+    /// 输入开着时参数（字体/字号/颜色/背景/旋转）变化 → ghost 即时重绘（真正的实时预览）
     func refreshTextPopupIfOpen(settings: ToolSettings) {
-        guard let tf = textPopup else { return }
-        let font = settings.textFont()
-        let color = NSColor(settings.textColor)
-        tf.font = font
-        tf.textColor = color
-        if let editor = tf.currentEditor() as? NSTextView {
-            let full = NSRange(location: 0, length: (editor.string as NSString).length)
-            let sel = editor.selectedRange()
-            editor.textStorage?.beginEditing()
-            editor.textStorage?.addAttributes([.font: font, .foregroundColor: color], range: full)
-            editor.textStorage?.endEditing()
-            editor.typingAttributes = [.font: font, .foregroundColor: color]
-            editor.setSelectedRange(sel)
+        guard let editor = textPopup else { return }
+        editor.font = settings.textFont()
+        editor.inkColor = NSColor(settings.textColor)   // 触发 refreshAttributes
+        syncGhostFromEditor()
+        editor.needsDisplay = true
+    }
+
+    // MARK: 文字感知批注（非扫描版：划选文字 → 逐行精准落批注）
+
+    /// 当前工具是否支持文字感知模式（划选文字精准批注）
+    private var toolSupportsTextMarkup: Bool {
+        switch activeTool {
+        case .highlight, .underline, .strikeOut: return true
+        default: return false
         }
-        applyTextPopupGeometry()
-        tf.needsDisplay = true
+    }
+
+    /// 页面是否有可用文字层（扫描版 page.string 为空）
+    private func pageHasText(_ page: PDFPage) -> Bool {
+        if textProbePage === page { return textProbeResult }
+        let s = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        textProbePage = page
+        textProbeResult = !s.isEmpty
+        return textProbeResult
+    }
+
+    /// 收割当前文字选区：按行（selectionsByLine）生成批注；按页分组入撤销栈（跨页划选每页一条记录）
+    private func harvestTextSelection() {
+        guard let tool = activeTool, toolSupportsTextMarkup, let sel = currentSelection else { return }
+        setCurrentSelection(nil, animate: false)   // 先清选区，避免蓝色高亮残留干扰视觉
+        var byPage: [Int: (page: PDFPage, annos: [PDFAnnotation])] = [:]
+        for line in sel.selectionsByLine() {
+            guard let page = line.pages.first else { continue }
+            let idx = document.map { $0.index(for: page) } ?? -1
+            guard idx >= 0 else { continue }
+            let b = line.bounds(for: page)
+            guard b.width > 1, b.height > 1 else { continue }
+            let annos = markupAnnotations(tool: tool, lineText: line.string ?? "", lineBounds: b)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for a in annos {
+                page.addAnnotation(a)
+                byPage[idx, default: (page, [])].annos.append(a)
+            }
+            CATransaction.commit()
+        }
+        for (idx, group) in byPage where !group.annos.isEmpty {
+            onAddBatch?(idx, group.annos)
+        }
+        if let e = NSApp.currentEvent { updateCursor(at: e) }
+    }
+
+    /// 按选中行的文字框生成批注：
+    /// 高亮 = 原生 Highlight 整行框（PDFKit 自动衬在字形后）；
+    /// 下划线/删除线 = 沿行框底/中的自绘笔迹（沿用线条宽度/波浪/颜色设置与橡皮擦机制，原生类型不读宽度）
+    private func markupAnnotations(tool: EditTool, lineText: String, lineBounds b: NSRect) -> [PDFAnnotation] {
+        switch tool {
+        case .highlight:
+            let anno = PDFAnnotation(bounds: b, forType: .highlight, withProperties: nil)
+            anno.color = NSColor(settings.highlightColor).withAlphaComponent(0.40)
+            return [anno]
+        case .underline:
+            let color = NSColor(settings.underlineColor)
+            let width = CGFloat(settings.underlineWidth)
+            // CJK 字形几乎占满行框（16% 处已穿字），贴行底 3%；西文行框含下伸部空间，16% 落在字形下
+            let y = b.minY + b.height * (Self.lineTextHasCJK(lineText) ? 0.03 : 0.16)
+            if settings.underlineWavy,
+               let w = wavyInk(a: NSPoint(x: b.minX, y: y), b: NSPoint(x: b.maxX, y: y),
+                               color: color, width: width) {
+                w.role = "underline"
+                return [w]
+            }
+            let s = PenStrokeAnnotation(pts: Self.densifiedLine(a: NSPoint(x: b.minX, y: y),
+                                                                 b: NSPoint(x: b.maxX, y: y)),
+                                        color: color, width: width)
+            s.role = "underline"
+            return [s]
+        case .strikeOut:
+            let y = b.midY
+            let s = PenStrokeAnnotation(pts: Self.densifiedLine(a: NSPoint(x: b.minX, y: y),
+                                                                 b: NSPoint(x: b.maxX, y: y)),
+                                        color: NSColor(settings.strikeColor),
+                                        width: CGFloat(settings.strikeWidth))
+            s.role = "strikeOut"
+            return [s]
+        default:
+            return []
+        }
+    }
+
+    /// 行文字是否含 CJK 字符（汉字/假名/谚文/全形符号）——决定下划线落位高度
+    static func lineTextHasCJK(_ s: String) -> Bool {
+        s.unicodeScalars.contains {
+            ($0.value >= 0x2E80 && $0.value <= 0x9FFF)   // 部首扩展~CJK统一表意/假名/谚文
+                || ($0.value >= 0xF900 && $0.value <= 0xFAFF) // CJK兼容表意
+                || ($0.value >= 0xFF00 && $0.value <= 0xFFEF) // 全形符号
+        }
     }
 
     // MARK: 生成批注

@@ -29,6 +29,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pendingOpenURL = nil
             workspace.openURL(pending)
         }
+        // 临时 UITEST：打字链路实测 harness
+        if ProcessInfo.processInfo.environment["MPDF_UITEST"] != nil
+            || ProcessInfo.processInfo.arguments.contains("--uitest") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                AnnotationPDFView.runUITestHarness()
+            }
+        }
     }
 
     private func installIfNeeded() {
@@ -59,7 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             && !event.modifierFlags.contains(.command)
             && !event.modifierFlags.contains(.control)
             && !event.modifierFlags.contains(.option)
-        if let tv = NSApp.keyWindow?.firstResponder as? NSTextView, tv.isFieldEditor, isPlainTyping {
+        if let tv = NSApp.keyWindow?.firstResponder as? NSTextView,
+           tv.isFieldEditor || tv is GhostTextEditor, isPlainTyping {
             return event
         }
 

@@ -417,6 +417,8 @@ enum L10n {
         "向右": "Rotate Right",
         "在页面上拖动确定位置和大小；点击未拖动时按图片比例插入": "Drag on the page to set position and size; click without dragging to insert at the image's aspect ratio",
         "在页面上按住拖动进行书写": "Hold and drag on the page to write",
+        "划选文字即可精准高亮；扫描版页面请拖动绘制": "Select text to highlight it precisely; drag to draw on scanned pages",
+        "划选文字即可沿线精准批注；扫描版页面请拖动绘制": "Select text for precise line annotations; drag to draw on scanned pages",
         "常规": "Regular",
         "拖动圈出点击后打开链接的热区": "Drag to mark the area that opens the link when clicked",
         "拖动遮盖敏感内容（黑色遮盖块）": "Drag to cover sensitive content (black block)",
@@ -468,7 +470,6 @@ enum L10n {
         "线条宽度": "Line Width",
         "背景颜色": "Background Color",
         "背景色": "Background Color",
-        "选择文件": "Choose File",
         "或将文件拖至此处": "or drag files here",
         "清除最近": "Clear Recents",
     ]
@@ -851,6 +852,8 @@ enum L10n {
         "向右": "向右",
         "在页面上拖动确定位置和大小；点击未拖动时按图片比例插入": "在頁面上拖動確定位置和大小；點擊未拖動時按圖片比例插入",
         "在页面上按住拖动进行书写": "在頁面上按住拖動進行書寫",
+        "划选文字即可精准高亮；扫描版页面请拖动绘制": "劃選文字即可精準高亮；掃描版頁面請拖動繪製",
+        "划选文字即可沿线精准批注；扫描版页面请拖动绘制": "劃選文字即可沿線精準批註；掃描版頁面請拖動繪製",
         "常规": "常規",
         "拖动圈出点击后打开链接的热区": "拖動圈出點擊後打開連結的熱區",
         "拖动遮盖敏感内容（黑色遮盖块）": "拖動遮蓋敏感內容（黑色遮蓋塊）",
@@ -902,7 +905,6 @@ enum L10n {
         "线条宽度": "線條寬度",
         "背景颜色": "背景顏色",
         "背景色": "背景顏色",
-        "选择文件": "選擇文件",
         "或将文件拖至此处": "或將文件拖至此處",
         "清除最近": "清除最近",
     ]

@@ -1068,6 +1068,8 @@ final class UndoCenter: ObservableObject {
             case .replaced(let original, let pieces):
                 for p in pieces { page.removeAnnotation(p) }
                 page.addAnnotation(original)
+            case .addedBatch(let annos):
+                for a in annos { page.removeAnnotation(a) }
             case .geometry(let anno, let before, _):
                 before.apply(to: anno)
             }
@@ -1087,6 +1089,8 @@ final class UndoCenter: ObservableObject {
             case .replaced(let original, let pieces):
                 page.removeAnnotation(original)
                 for p in pieces { page.addAnnotation(p) }
+            case .addedBatch(let annos):
+                for a in annos { page.addAnnotation(a) }
             case .geometry(let anno, _, let after):
                 after.apply(to: anno)
             }
