@@ -22,6 +22,8 @@ struct ContentView: View {
     @State private var entry: MainEntry = ProcessInfo.processInfo.arguments.contains("--probe") ? .edit : .preview
     @State private var statusText: String?
     @State private var errorText: String?
+    /// 非 nil = 后台保存/另存为进行中（进度 0...1）；同时作为互斥与交互遮罩开关
+    @State private var saveProgress: Double?
     @State private var exportTool: ExportToolKind?
     @ObservedObject private var undoCenter = UndoCenter.shared   // 全局撤销/重做按钮态
 
@@ -53,6 +55,28 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .menuSaveAsPDF)) { _ in if doc.document != nil { exportPDF() } }
         .sheet(item: $exportTool) { kind in
             ExportToolsSheet(kind: kind) { msg in statusText = msg }
+        }
+        .overlay {
+            // 后台保存进度：半透明遮罩挡住交互（保存期间禁止编辑，防止与写盘竞态）
+            if let p = saveProgress {
+                ZStack {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.001))
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                    VStack(spacing: 12) {
+                        ProgressView(value: min(p, 1))
+                            .frame(width: 220)
+                        Text(L("正在保存…") + String(format: " %.0f%%", min(p, 1) * 100))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(24)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .shadow(color: .black.opacity(0.18), radius: 14)
+                }
+                .transition(.opacity)
+            }
         }
         .onChange(of: workspace.active.id) { _ in
             statusText = nil   // 切换标签：状态栏提示属于上一个会话，不保留
@@ -308,49 +332,57 @@ struct ContentView: View {
         return (wm, min(s, e)...max(s, e))
     }
 
-    /// 页面结构改动未落盘时，先把基础文档写回原文件
-    @discardableResult
-    private func flushPageEdits() -> Bool {
-        guard doc.hasPageEdits, let url = doc.url, let d = doc.document else { return true }
-        guard d.write(to: url) else {
-            errorText = L("页面改动写入失败"); return false
-        }
-        doc.hasPageEdits = false
-        return true
-    }
-
-    /// 批注改动未落盘时写回原文件（含「隐藏」批注的页面压平进页面内容）
-    @discardableResult
-    private func flushAnnotations() -> Bool {
-        guard doc.hasAnnotationEdits, let url = doc.url, let d = doc.document else { return true }
-        guard d.pageCount == 0 || doc.writeFlattened(to: url) else {
-            errorText = L("批注写入失败"); return false
-        }
-        doc.hasAnnotationEdits = false
-        return true
-    }
-
-    /// 保存：页面/批注改动写回原文件；有章/水印时再盖章导出覆盖
+    /// 保存：内存快照后台写回原文件（含「隐藏」批注压平）；有章/水印时再盖章导出覆盖。
+    /// 旧实现先 flushPageEdits + flushAnnotations 两次同步写盘，大文档卡 UI 十几秒；
+    /// 快照本就携带全部页面+批注改动，一次后台写盘即可同时落两类改动。
     private func saveInPlace() {
-        guard doc.url != nil else { errorText = L("请先打开 PDF"); return }
-        guard flushPageEdits() else { return }
-        guard flushAnnotations() else { return }
+        guard let target = doc.url else { errorText = L("请先打开 PDF"); return }
+        guard saveProgress == nil else { return }   // 已有保存进行中
         let base = try? buildPlacements()
         let wmParams = watermarkParams
-        if base == nil && wmParams == nil {
-            // 无章无水印：基础文档已写盘，仅页面改动
+        let hadEdits = doc.hasPageEdits || doc.hasAnnotationEdits
+        if !hadEdits && base == nil && wmParams == nil {
             statusText = LF("已保存：%@", doc.displayName)
             doc.isDirty = false
             return
         }
-        do {
-            try PDFExporter.export(input: doc.url!, output: doc.url!,
-                                   placements: base?.placements ?? [], seals: base?.seals ?? [:],
-                                   watermark: wmParams?.config, watermarkPages: wmParams?.pages)
-            statusText = LF("已保存：%@", doc.displayName)
-            doc.isDirty = false   // 原地保存后无未保存改动
-        } catch {
-            errorText = error.localizedDescription
+        // ⭐ 快照在主线程生成：活文档只在此线程访问；写盘全部转后台
+        let snapshot = doc.document?.dataRepresentation()
+        guard snapshot != nil else { errorText = L("写入失败，请检查目标位置是否可写"); return }
+        saveProgress = 0.0
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = snapshot.flatMap { snap in
+                DocumentStore.writeSnapshot(snap, to: target, onProgress: { p in
+                    DispatchQueue.main.async { saveProgress = p * 0.6 }
+                })
+            } ?? false
+            guard ok else {
+                DispatchQueue.main.async {
+                    saveProgress = nil
+                    errorText = L("写入失败，请检查目标位置是否可写")
+                }
+                return
+            }
+            do {
+                if base != nil || wmParams != nil {
+                    DispatchQueue.main.async { saveProgress = 0.62 }
+                    try PDFExporter.export(input: target, output: target,
+                                           placements: base?.placements ?? [], seals: base?.seals ?? [:],
+                                           watermark: wmParams?.config, watermarkPages: wmParams?.pages)
+                }
+                DispatchQueue.main.async {
+                    saveProgress = nil
+                    statusText = LF("已保存：%@", doc.displayName)
+                    doc.isDirty = false   // 原地保存后无未保存改动
+                    doc.hasPageEdits = false
+                    doc.hasAnnotationEdits = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    saveProgress = nil
+                    errorText = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -373,53 +405,84 @@ struct ContentView: View {
         panel.beginSheetModal(for: NSApp.mainWindow!) { resp in
             guard resp == .OK, let target = panel.url else { return }
             let tOK = CFAbsoluteTimeGetCurrent()   // 计时黑匣子：面板确认瞬间
-            AnnotationPDFView.diag(String(format: "SAVE panel-OK t=%.0f hasOverlays=%d", tOK, (!(base?.placements.isEmpty ?? true) || wmParams != nil) ? 1 : 0))
-            // 快路径：无章无水印时纯另存——跳过临时基底与逐页压平（实测 228 页/108MB
-            // 压平要 4s），有页改动直写目标、无改动字节复制，只剩一次必需的写盘
+            guard saveProgress == nil else { return }   // 已有保存进行中
             let hasOverlays = !(base?.placements.isEmpty ?? true) || wmParams != nil
-            if !hasOverlays {
+            let hadEdits = doc.hasPageEdits || doc.hasAnnotationEdits
+            // ⭐ 快照在主线程生成（活文档只在此线程访问），写盘全部转后台
+            let tS0 = CFAbsoluteTimeGetCurrent()
+            let snapshot = doc.document?.dataRepresentation()
+            saveDiag(String(format: "SAVE snapshot=%.0fms data=%.1fMB hasOverlays=%d",
+                            (CFAbsoluteTimeGetCurrent() - tS0) * 1000,
+                            snapshot.map { Double($0.count) / 1048576 } ?? 0, hasOverlays ? 1 : 0))
+            guard snapshot != nil else { errorText = L("写入失败，请检查目标位置是否可写"); return }
+            let overlayPlacements = base?.placements ?? []
+            let overlaySeals = base?.seals ?? [:]
+            saveProgress = 0.0
+            DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     if FileManager.default.fileExists(atPath: target.path) {
                         try FileManager.default.removeItem(at: target)   // 面板已确认覆盖
                     }
-                    if doc.hasPageEdits || doc.hasAnnotationEdits, let d = doc.document {
-                        guard doc.writeFlattened(to: target) else {
-                            errorText = L("写入失败，请检查目标位置是否可写"); return
+                    // 快路径：无章无水印时纯另存——跳过临时基底与逐页压平（实测 228 页/108MB
+                    // 压平要 4s），有页改动直写目标、无改动字节复制，只剩一次必需的写盘
+                    if !hasOverlays {
+                        if hadEdits {
+                            let ok = DocumentStore.writeSnapshot(snapshot!, to: target, onProgress: { p in
+                                DispatchQueue.main.async { saveProgress = p }
+                            })
+                            DispatchQueue.main.async {
+                                saveProgress = nil
+                                if ok {
+                                    statusText = LF("已导出：%@", target.lastPathComponent)
+                                    doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
+                                } else {
+                                    errorText = L("写入失败，请检查目标位置是否可写")
+                                }
+                            }
+                        } else {
+                            try FileManager.default.copyItem(at: srcURL, to: target)
+                            DispatchQueue.main.async {
+                                saveProgress = nil
+                                statusText = LF("已导出：%@", target.lastPathComponent)
+                                doc.isDirty = false
+                            }
                         }
-                    } else {
-                        try FileManager.default.copyItem(at: srcURL, to: target)
+                        return
                     }
-                    statusText = LF("已导出：%@", target.lastPathComponent)
-                    doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
+
+                    // 盖章/水印路径：先把快照落临时基底，再压平导出
+                    var input = srcURL
+                    var tempURL: URL?
+                    if hadEdits {
+                        let tmp = FileManager.default.temporaryDirectory
+                            .appendingPathComponent("export-base-\(UUID().uuidString).pdf")
+                        if DocumentStore.writeSnapshot(snapshot!, to: tmp, onProgress: { p in
+                            DispatchQueue.main.async { saveProgress = p * 0.6 }   // 压平占 60%，导出占 40%
+                        }) {
+                            input = tmp
+                            tempURL = tmp
+                        }
+                    }
+                    defer { if let t = tempURL { try? FileManager.default.removeItem(at: t) } }
+
+                    DispatchQueue.main.async { saveProgress = 0.62 }
+                    let tE = CFAbsoluteTimeGetCurrent()
+                    try PDFExporter.export(input: input, output: target,
+                                           placements: overlayPlacements, seals: overlaySeals,
+                                           watermark: wmParams?.config, watermarkPages: wmParams?.pages)
+                    saveDiag(String(format: "SAVE   PDFExporter.export=%.0fms afterOK=%.0fms",
+                                    (CFAbsoluteTimeGetCurrent() - tE) * 1000, (CFAbsoluteTimeGetCurrent() - tOK) * 1000))
+                    DispatchQueue.main.async {
+                        saveProgress = nil
+                        statusText = LF("已导出：%@", target.lastPathComponent)
+                        doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
+                    }
                 } catch {
-                    errorText = error.localizedDescription
+                    DispatchQueue.main.async {
+                        saveProgress = nil
+                        errorText = error.localizedDescription
+                    }
                 }
-                return
-            }
-
-            // 盖章/水印路径：先把内存文档（含未保存页操作与批注）落临时基底，再压平导出
-            var input = srcURL
-            var tempURL: URL?
-            if doc.hasPageEdits || doc.hasAnnotationEdits, let d = doc.document {
-                let tmp = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("export-base-\(UUID().uuidString).pdf")
-                if doc.writeFlattened(to: tmp) {
-                    input = tmp
-                    tempURL = tmp
-                }
-            }
-            defer { if let t = tempURL { try? FileManager.default.removeItem(at: t) } }
-
-            do {
-                let tE = CFAbsoluteTimeGetCurrent()
-                try PDFExporter.export(input: input, output: target,
-                                       placements: base?.placements ?? [], seals: base?.seals ?? [:],
-                                       watermark: wmParams?.config, watermarkPages: wmParams?.pages)
-                AnnotationPDFView.diag(String(format: "SAVE   PDFExporter.export=%.0fms afterOK=%.0fms", (CFAbsoluteTimeGetCurrent() - tE) * 1000, (CFAbsoluteTimeGetCurrent() - tOK) * 1000))
-                statusText = LF("已导出：%@", target.lastPathComponent)
-                doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
-            } catch {
-                errorText = error.localizedDescription
             }
         }
     }

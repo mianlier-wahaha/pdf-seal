@@ -5,10 +5,21 @@ import SealCore
 
 // MARK: - 文档
 
+/// 后台写盘专用诊断：直接追加一行到 /tmp/mpdf_diag.log。
+/// AnnotationPDFView.diag 的环形缓冲只在主线程安全，后台保存线程用本函数。
+func saveDiag(_ s: String) {
+    let line = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium) + " " + s + "\n"
+    if let fh = FileHandle(forWritingAtPath: "/tmp/mpdf_diag.log") {
+        fh.seekToEndOfFile()
+        fh.write(line.data(using: .utf8)!)
+        fh.closeFile()
+    }
+}
+
 @MainActor
 final class DocumentStore: ObservableObject {
     /// 「隐藏」批注的标记（userName）：保存/另存为时据此把遮盖块压平进页面内容
-    static let redactMarker = "mPDF-redact"
+    nonisolated static let redactMarker = "mPDF-redact"
 
     @Published var document: PDFDocument?
     @Published var url: URL?
@@ -148,52 +159,65 @@ final class DocumentStore: ObservableObject {
 
     /// 写盘：含「隐藏」批注的页面在落盘时压平——遮盖块烘焙进页面内容、注释层不再携带，
     /// 其余批注原样保留。内存中的文档不受影响（仍可撤销/继续编辑）。
-    func writeFlattened(to url: URL) -> Bool {
+    /// 可传 onProgress 驱动后台保存进度条。
+    func writeFlattened(to url: URL, onProgress: ((Double) -> Void)? = nil) -> Bool {
         guard let d = document else { return false }
+        // ⭐ 快照必须在调用（主）线程生成：PDFKit 非线程安全，活文档只允许主线程访问；
+        //   后台写盘只操作快照副本。
+        guard let data = d.dataRepresentation() else { return false }
+        return Self.writeSnapshot(data, to: url, onProgress: onProgress)
+    }
+
+    /// 从内存快照写盘（快照由调用方在主线程生成；本函数可在后台线程执行）。
+    /// 进度：0.05 快照读回 → 0.85 逐页压平 → 0.9 写盘前 → 1.0 完成。
+    nonisolated static func writeSnapshot(_ data: Data, to url: URL, onProgress: ((Double) -> Void)? = nil) -> Bool {
         let t0 = CFAbsoluteTimeGetCurrent()
-        let hasRedact = (0..<d.pageCount).contains { i in
-            d.page(at: i)?.annotations.contains { $0.userName == Self.redactMarker } ?? false
+        onProgress?(0.02)
+        guard let src = PDFDocument(data: data) else { return false }
+        onProgress?(0.05)
+        let hasRedact = (0..<src.pageCount).contains { i in
+            src.page(at: i)?.annotations.contains { $0.userName == redactMarker } ?? false
         }
         let t1 = CFAbsoluteTimeGetCurrent()
-        defer { AnnotationPDFView.diag(String(format: "SAVE writeFlattened total=%.0fms (scan=%.0fms flat+write=%.0fms) pages=%d", (CFAbsoluteTimeGetCurrent() - t0) * 1000, (t1 - t0) * 1000, (CFAbsoluteTimeGetCurrent() - t1) * 1000, d.pageCount)) }
-        if hasRedact, let (flat, keepers, sub) = Self.flattenRedactions(d) {
+        defer { saveDiag(String(format: "SAVE writeFlattened total=%.0fms (readback+scan=%.0fms flat+write=%.0fms) pages=%d", (CFAbsoluteTimeGetCurrent() - t0) * 1000, (t1 - t0) * 1000, (CFAbsoluteTimeGetCurrent() - t1) * 1000, src.pageCount)) }
+        if hasRedact, let (flat, keepers, sub) = Self.flattenRedactions(src, onProgress: { onProgress?($0) }) {
             // ⭐ keepers 必须活到写盘结束：页面挪入 flat 后，其内容流与保留批注的 /AP
             // 外观流仍引用来源文档的 CGPDFSource，来源文档先释放 → 写出扫流即野指针崩溃
             // （SIGSEGV at 0x14/0x1b，PDFSeal-2026-10-20 三份崩溃报告实证）。
             let t2 = CFAbsoluteTimeGetCurrent()
+            onProgress?(0.9)
             let ok = flat.write(to: url)
-            AnnotationPDFView.diag(String(format: "SAVE   flatten sub: %@ | write=%.0fms ok=%d", sub, (CFAbsoluteTimeGetCurrent() - t2) * 1000, ok ? 1 : 0))
+            onProgress?(1.0)
+            saveDiag(String(format: "SAVE   flatten sub: %@ | write=%.0fms ok=%d", sub, (CFAbsoluteTimeGetCurrent() - t2) * 1000, ok ? 1 : 0))
             _ = keepers   // 作用域兜底：写盘完成前不释放
             return ok
         }
         let t2 = CFAbsoluteTimeGetCurrent()
-        let ok = d.write(to: url)   // 无隐藏批注或压平失败：原样写出兜底
-        AnnotationPDFView.diag(String(format: "SAVE   direct write=%.0fms ok=%d redact=%d", (CFAbsoluteTimeGetCurrent() - t2) * 1000, ok ? 1 : 0, hasRedact ? 1 : 0))
+        onProgress?(0.9)
+        let ok = src.write(to: url)   // 无隐藏批注或压平失败：快照原样写出兜底
+        onProgress?(1.0)
+        saveDiag(String(format: "SAVE   direct write=%.0fms ok=%d redact=%d", (CFAbsoluteTimeGetCurrent() - t2) * 1000, ok ? 1 : 0, hasRedact ? 1 : 0))
         return ok
     }
 
-    /// 压平隐藏批注：先整册序列化（让 PDFKit 生成全部外观流），再对含隐藏块的页面
+    /// 压平隐藏批注：src 为快照读回副本（序列化已由调用方完成），对含隐藏块的页面
     /// 用 CGContext 重画——只画页面内容 + 按批注颜色填遮盖矩形，其余批注重新挂回注释层。
+    /// 无隐藏块的页面直接挪入目标文档（跳过重绘——只藏一两页的常规场景大提速）。
     /// 返回 (压平文档, 生命周期依赖, 计时分解)：页面/批注被挪入新文档后仍引用来源文档的
     /// CGPDFSource，调用方必须持有这些来源文档直到写盘完成。
-    private static func flattenRedactions(_ d: PDFDocument) -> (PDFDocument, [PDFDocument], String)? {
-        let tA = CFAbsoluteTimeGetCurrent()
-        // ① 序列化→读回，确保所有批注外观流已生成（副本可安全改写）
-        guard let data = d.dataRepresentation() else { return nil }
-        let tA2 = CFAbsoluteTimeGetCurrent()
-        guard let src = PDFDocument(data: data) else { return nil }
-        let tB = CFAbsoluteTimeGetCurrent()
+    nonisolated private static func flattenRedactions(_ src: PDFDocument, onProgress: @escaping (Double) -> Void) -> (PDFDocument, [PDFDocument], String)? {
         let out = PDFDocument()
         var keepers: [PDFDocument] = [src]
         var any = false
         var flatPages = 0
         var drawMs: Double = 0
         var readbackMs: Double = 0
+        let total = max(src.pageCount, 1)
         for i in 0..<src.pageCount {
             guard let page = src.page(at: i) else { continue }
             let redacts = page.annotations.filter { $0.userName == redactMarker }
             guard !redacts.isEmpty else {
-                out.insert(page, at: i)   // src 是临时读回的草稿文档，直接挪页即可
+                out.insert(page, at: i)   // 无隐藏块：直接挪页，跳过重绘
                 continue
             }
             any = true
@@ -225,8 +249,9 @@ final class DocumentStore: ObservableObject {
                 out.insert(page, at: i)
             }
             readbackMs += CFAbsoluteTimeGetCurrent() - tD
+            onProgress(0.05 + 0.8 * Double(i + 1) / Double(total))
         }
-        let sub = String(format: "serialize=%.0fms(data=%.1fMB) readback=%.0fms redraw=%dpg/%.0fms pageReadback=%.0fms", (tA2 - tA) * 1000, Double(data.count) / 1048576, (tB - tA2) * 1000, flatPages, drawMs * 1000, readbackMs * 1000)
+        let sub = String(format: "redraw=%dpg/%.0fms pageReadback=%.0fms", flatPages, drawMs * 1000, readbackMs * 1000)
         return any ? (out, keepers, sub) : nil
     }
 }
