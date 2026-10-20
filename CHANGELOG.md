@@ -2,6 +2,11 @@
 
 所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [2.9.6] - 2026-10-20
+
+### 修复
+- **另存为闪退（SIGSEGV）**：含隐藏批注压平写盘时，被挪入新文档的页面与保留批注的外观流仍引用临时来源文档的 `CGPDFSource`，来源文档提前释放导致写出时扫流访问野指针（三份崩溃报告同栈：`dictionaryRef → drawAppearance → CGPDFSourceCreateCopy`）。修复：来源文档生命周期绑定到写盘完成之后。
+
 ## [2.9.5] - 2026-10-20
 
 ### 新增

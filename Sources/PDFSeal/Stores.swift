@@ -153,18 +153,26 @@ final class DocumentStore: ObservableObject {
         let hasRedact = (0..<d.pageCount).contains { i in
             d.page(at: i)?.annotations.contains { $0.userName == Self.redactMarker } ?? false
         }
-        guard hasRedact, let flat = Self.flattenRedactions(d), flat.write(to: url) else {
-            return d.write(to: url)   // 无隐藏批注或压平失败：原样写出兜底
+        if hasRedact, let (flat, keepers) = Self.flattenRedactions(d) {
+            // ⭐ keepers 必须活到写盘结束：页面挪入 flat 后，其内容流与保留批注的 /AP
+            // 外观流仍引用来源文档的 CGPDFSource，来源文档先释放 → 写出扫流即野指针崩溃
+            // （SIGSEGV at 0x14/0x1b，PDFSeal-2026-10-20 三份崩溃报告实证）。
+            let ok = flat.write(to: url)
+            _ = keepers   // 作用域兜底：写盘完成前不释放
+            return ok
         }
-        return true
+        return d.write(to: url)   // 无隐藏批注或压平失败：原样写出兜底
     }
 
     /// 压平隐藏批注：先整册序列化（让 PDFKit 生成全部外观流），再对含隐藏块的页面
     /// 用 CGContext 重画——只画页面内容 + 按批注颜色填遮盖矩形，其余批注重新挂回注释层。
-    private static func flattenRedactions(_ d: PDFDocument) -> PDFDocument? {
+    /// 返回 (压平文档, 生命周期依赖)：页面/批注被挪入新文档后仍引用来源文档的
+    /// CGPDFSource，调用方必须持有这些来源文档直到写盘完成。
+    private static func flattenRedactions(_ d: PDFDocument) -> (PDFDocument, [PDFDocument])? {
         // ① 序列化→读回，确保所有批注外观流已生成（副本可安全改写）
         guard let data = d.dataRepresentation(), let src = PDFDocument(data: data) else { return nil }
         let out = PDFDocument()
+        var keepers: [PDFDocument] = [src]
         var any = false
         for i in 0..<src.pageCount {
             guard let page = src.page(at: i) else { continue }
@@ -191,14 +199,15 @@ final class DocumentStore: ObservableObject {
             }
             ctx.endPDFPage()
             ctx.closePDF()
-            if let flatPage = PDFDocument(data: flatData as Data)?.page(at: 0) {
+            if let flatSrc = PDFDocument(data: flatData as Data), let flatPage = flatSrc.page(at: 0) {
+                keepers.append(flatSrc)                       // flatPage 的内容流引用 flatSrc
                 for a in keep { flatPage.addAnnotation(a) }   // 其余批注挂回注释层，仍可编辑
                 out.insert(flatPage, at: i)
             } else {
                 out.insert(page, at: i)
             }
         }
-        return any ? out : nil
+        return any ? (out, keepers) : nil
     }
 }
 
