@@ -1083,6 +1083,8 @@ final class UndoCenter: ObservableObject {
                 page.addAnnotation(original)
             case .addedBatch(let annos):
                 for a in annos { page.removeAnnotation(a) }
+            case .addedCrossPage(let pairs):
+                for (i, a) in pairs { document.page(at: i)?.removeAnnotation(a) }
             case .geometry(let anno, let before, _):
                 before.apply(to: anno)
             case .textEdited(let anno, let beforeGeom, let beforeText, _, _):
@@ -1106,6 +1108,8 @@ final class UndoCenter: ObservableObject {
                 for p in pieces { page.addAnnotation(p) }
             case .addedBatch(let annos):
                 for a in annos { page.addAnnotation(a) }
+            case .addedCrossPage(let pairs):
+                for (i, a) in pairs { document.page(at: i)?.addAnnotation(a) }
             case .geometry(let anno, _, let after):
                 after.apply(to: anno)
             case .textEdited(let anno, _, _, let afterGeom, let afterText):

@@ -106,6 +106,7 @@ struct ToolSettings {
     var eraserPartial = false   // false = 触及整条消失；true = 只擦除触及部分
     // 隐藏工具填充色
     var redactColor: Color = .black
+    var redactEveryPage = false // 每页同一位置：一次绘制，所有页面同位置落遮盖
     // 文本
     var textFontName = "PingFang SC"
     var textSize: Double = 25
@@ -569,6 +570,10 @@ struct EditMainView: View {
             }
             sectionLabel("填充颜色")
             SwatchRow(color: $settings.redactColor)
+            Toggle(L("每页同一位置"), isOn: $settings.redactEveryPage)
+                .font(.callout)
+            Text(L("开启后，一次绘制会在文档所有页面的相同位置落遮盖"))
+                .font(.caption).foregroundStyle(.secondary)
             Text(L("拖动遮盖敏感内容"))
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -945,6 +950,8 @@ enum AnnotationUndoAction {
     case replaced(original: PDFAnnotation, pieces: [PDFAnnotation])
     /// 复合新增（文字感知批注一次划选落多行）：撤销 = 一次移除全部，重做 = 一次重加
     case addedBatch([PDFAnnotation])
+    /// 跨页批量新增（隐藏「每页同一位置」）：撤销/重做按 (页码, 批注) 对跨页增删
+    case addedCrossPage([(Int, PDFAnnotation)])
     /// 几何改动（选中后移动/缩放/旋转）：撤销还原 before 快照，重做套用 after 快照
     case geometry(PDFAnnotation, before: AnnotationGeomSnapshot, after: AnnotationGeomSnapshot)
     /// 文本内容编辑（双击已有文本框改字）：撤销 = 还原 before 文字与几何，重做 = 套用 after
@@ -1663,6 +1670,13 @@ struct AnnotationPageView: NSViewRepresentable {
             doc.hasAnnotationEdits = true
             onAdded()
         }
+        v.onAddCrossPage = { pairs in
+            // 隐藏「每页同一位置」= 跨页单条撤销记录（⌘Z 一次全撤）
+            AnnotationUndoStack.shared.push(document: doc.document!, pageIndex: pairs[0].0, action: .addedCrossPage(pairs))
+            doc.isDirty = true
+            doc.hasAnnotationEdits = true
+            onAdded()
+        }
         v.onGeometryEdited = {
             doc.isDirty = true
             doc.hasAnnotationEdits = true
@@ -1718,6 +1732,8 @@ final class AnnotationPDFView: PDFView {
     var onCompositeErase: ((Int, PDFAnnotation, [PDFAnnotation]) -> Void)? = nil
     /// 复合新增（文字感知批注一次划选落多行）：单条撤销记录
     var onAddBatch: ((Int, [PDFAnnotation]) -> Void)? = nil
+    /// 跨页批量新增（隐藏「每页同一位置」）：单条撤销记录
+    var onAddCrossPage: (([(Int, PDFAnnotation)]) -> Void)? = nil
     /// 选中态几何改动（移动/缩放/旋转）完成：仅刷脏标记，撤销记录由交互结束处统一入栈
     var onGeometryEdited: (() -> Void)? = nil
     /// 双击编辑既有文本批注提交：单条 textEdited 撤销记录（before/after 文字+几何）
@@ -2588,7 +2604,22 @@ final class AnnotationPDFView: PDFView {
         guard idx >= 0 else { clearOverlay(); return }
         guard let anno = makeAnnotation(tool: activeTool, page: page, a: a, b: b) else { clearOverlay(); return }
         page.addAnnotation(anno)
-        onAddAnnotation?(idx, anno)
+        // 隐藏「每页同一位置」：当前页落绘制结果，其余每页同位置克隆一份（跨页单条撤销）
+        if activeTool == .redact, settings.redactEveryPage, let doc = document, doc.pageCount > 1 {
+            var pairs: [(Int, PDFAnnotation)] = [(idx, anno)]
+            for i in 0..<doc.pageCount where i != idx {
+                guard let pg = doc.page(at: i) else { continue }
+                let r = PDFAnnotation(bounds: anno.bounds, forType: .square, withProperties: nil)
+                r.color = anno.color
+                r.interiorColor = anno.interiorColor
+                r.userName = DocumentStore.redactMarker
+                pg.addAnnotation(r)
+                pairs.append((i, r))
+            }
+            onAddCrossPage?(pairs)
+        } else {
+            onAddAnnotation?(idx, anno)
+        }
         // 画完形状默认显示控制点（选中态）；其余工具收起辅助层
         if activeTool == .shape {
             selectedAnno = anno
