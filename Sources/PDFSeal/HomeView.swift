@@ -39,6 +39,8 @@ enum RecentFiles {
 struct WorkspaceHomeView: View {
     let onOpen: (URL) -> Void
     let onPick: () -> Void
+    var onMerge: () -> Void = {}
+    var onCreate: () -> Void = {}
 
     @State private var recents: [URL] = RecentFiles.urls()
     @State private var thumbs: [String: NSImage] = [:]
@@ -51,6 +53,7 @@ struct WorkspaceHomeView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text(L("工作中心")).font(.title2.weight(.semibold))
 
+                quickTools
                 openZone
 
                 HStack {
@@ -92,13 +95,50 @@ struct WorkspaceHomeView: View {
         .onAppear { recents = RecentFiles.urls() }
     }
 
+    // MARK: 快速工具：合并文件 / 转换 PDF（无需先打开文档）
+
+    private var quickTools: some View {
+        HStack(spacing: 12) {
+            quickCard(icon: "square.on.square.intersection.dashed",
+                      title: L("合并文件"),
+                      subtitle: L("多个 PDF 合并为一个"),
+                      action: onMerge)
+            quickCard(icon: "arrow.2.squarepath",
+                      title: L("转换 PDF"),
+                      subtitle: L("空白页 / 图像 / Word / Excel / PPT / 剪贴板"),
+                      action: onCreate)
+        }
+    }
+
+    private func quickCard(icon: String, title: String, subtitle: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 22))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.callout.weight(.semibold))
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(12)
+            .dialogCard()
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .handCursor()
+    }
+
     // MARK: 打开区（未打开文件时不显示盖章/页面管理入口——那些功能需要先有文档）
 
     private var openZone: some View {
         Button(action: onPick) {
-            VStack(spacing: 14) {
+            VStack(spacing: 10) {
                 Image(systemName: "doc.on.doc")
-                    .font(.system(size: 40, weight: .light))
+                    .font(.system(size: 26, weight: .light))
                     .foregroundStyle(.tertiary)
                 Text(L("选择文件"))
                     .font(.callout.weight(.medium))
@@ -111,7 +151,7 @@ struct WorkspaceHomeView: View {
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 44)
+            .padding(.vertical, 20)
             .dialogCard()
             .contentShape(Rectangle())
         }

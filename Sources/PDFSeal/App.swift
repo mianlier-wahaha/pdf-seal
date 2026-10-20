@@ -33,6 +33,25 @@ struct PDFSealApp: App {
                 Button(L("另存为")) { NotificationCenter.default.post(name: .menuSaveAsPDF, object: nil) }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
             }
+            // 工具菜单：只收录本 app 已有的功能入口（没有的项不占位）
+            CommandMenu(L("工具")) {
+                Button(L("编辑 PDF")) { NotificationCenter.default.post(name: .menuToolEdit, object: nil) }
+                Button(L("标记密文")) { NotificationCenter.default.post(name: .menuToolRedact, object: nil) }
+                Button(L("组织页面")) { NotificationCenter.default.post(name: .menuToolPageManage, object: nil) }
+                Button(L("水印")) { NotificationCenter.default.post(name: .menuToolStamp, object: nil) }
+                Divider()
+                Button(L("合并文件…")) { NotificationCenter.default.post(name: .menuMergeFiles, object: nil) }
+                Menu(L("创建 PDF")) {
+                    Button(L("空白页面")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
+                    Button(L("从文件创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
+                    Button(L("从图像创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
+                    Button(L("从剪贴板创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
+                    Divider()
+                    Button(L("从 Word 创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
+                    Button(L("从 Excel 创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
+                    Button(L("从 PowerPoint 创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
+                }
+            }
         }
     }
 }
@@ -41,4 +60,11 @@ extension Notification.Name {
     static let menuOpenPDF = Notification.Name("PDFSeal.menuOpenPDF")
     static let menuSavePDF = Notification.Name("PDFSeal.menuSavePDF")
     static let menuSaveAsPDF = Notification.Name("PDFSeal.menuSaveAsPDF")
+    // 工具菜单（v2.10.0）
+    static let menuToolEdit = Notification.Name("PDFSeal.menuToolEdit")
+    static let menuToolRedact = Notification.Name("PDFSeal.menuToolRedact")
+    static let menuToolPageManage = Notification.Name("PDFSeal.menuToolPageManage")
+    static let menuToolStamp = Notification.Name("PDFSeal.menuToolStamp")
+    static let menuMergeFiles = Notification.Name("PDFSeal.menuMergeFiles")
+    static let menuCreatePDF = Notification.Name("PDFSeal.menuCreatePDF")
 }

@@ -24,6 +24,13 @@ struct ContentView: View {
     @State private var errorText: String?
     /// 非 nil = 后台保存/另存为进行中（进度 0...1）；同时作为互斥与交互遮罩开关
     @State private var saveProgress: Double?
+    /// 工具箱 sheet（工作中心快速入口 / 菜单栏「工具」菜单共用）
+    @State private var toolSheet: ToolSheetKind?
+
+    enum ToolSheetKind: String, Identifiable {
+        case merge, create
+        var id: String { rawValue }
+    }
     @State private var exportTool: ExportToolKind?
     @ObservedObject private var undoCenter = UndoCenter.shared   // 全局撤销/重做按钮态
 
@@ -56,6 +63,18 @@ struct ContentView: View {
         .sheet(item: $exportTool) { kind in
             ExportToolsSheet(kind: kind) { msg in statusText = msg }
         }
+        .sheet(item: $toolSheet) { kind in
+            switch kind {
+            case .merge: MergeFilesView(onOpen: openPDF)
+            case .create: CreatePDFView(onOpen: openPDF)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .menuToolEdit)) { _ in entry = .edit }
+        .onReceive(NotificationCenter.default.publisher(for: .menuToolPageManage)) { _ in entry = .pageManage }
+        .onReceive(NotificationCenter.default.publisher(for: .menuToolStamp)) { _ in entry = .stamp }
+        .onReceive(NotificationCenter.default.publisher(for: .menuToolRedact)) { _ in entry = .edit }
+        .onReceive(NotificationCenter.default.publisher(for: .menuMergeFiles)) { _ in toolSheet = .merge }
+        .onReceive(NotificationCenter.default.publisher(for: .menuCreatePDF)) { _ in toolSheet = .create }
         .overlay {
             // 后台保存进度：半透明遮罩挡住交互（保存期间禁止编辑，防止与写盘竞态）
             if let p = saveProgress {
@@ -254,8 +273,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private var mainContent: some View {
-        if doc.document == nil {
-            WorkspaceHomeView(onOpen: openPDF, onPick: pickPDF)
+            if doc.document == nil {
+                WorkspaceHomeView(onOpen: openPDF, onPick: pickPDF,
+                                  onMerge: { toolSheet = .merge },
+                                  onCreate: { toolSheet = .create })
         } else {
             Group {
                 switch entry {
