@@ -16,6 +16,8 @@ final class Session: ObservableObject {
         settings.$qifengStamps.dropFirst().sink { [weak doc] _ in doc?.isDirty = true }.store(in: &cancellables)
         settings.$fullStamps.dropFirst().sink { [weak doc] _ in doc?.isDirty = true }.store(in: &cancellables)
         settings.$watermark.dropFirst().sink { [weak doc] _ in doc?.isDirty = true }.store(in: &cancellables)
+        // 转发文档脏标记 → 会话自身 objectWillChange（标签圆点/关闭钮依赖此刷新）
+        doc.$isDirty.dropFirst().sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
     }
 
     var title: String { doc.url?.lastPathComponent ?? L("未命名") }

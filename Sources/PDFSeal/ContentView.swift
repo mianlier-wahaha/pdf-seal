@@ -193,6 +193,7 @@ struct ContentView: View {
     // MARK: 标签栏（独立于工具栏的一行；只显示已打开 PDF 的标签，空白会话不算标签）
 
     @State private var draggingTabID: UUID?
+    @State private var hoveredTabID: UUID?
 
     /// 仅有文档的会话才算标签；空白起始会话不显示
     private var openTabs: [Session] {
@@ -214,24 +215,31 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
+    /// 关闭标签：有未保存编辑时先弹确认（与窗口关闭同口径），确认后丢弃改动关闭
+    private func requestCloseTab(_ s: Session) {
+        guard s.doc.isDirty else { workspace.close(s.id); return }
+        let alert = NSAlert()
+        alert.messageText = L("该文件尚未保存，是否关闭？")
+        alert.informativeText = LF("「%@」有未保存的编辑，关闭后将丢失。", s.title)
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: L("取消"))
+        alert.addButton(withTitle: L("确认关闭"))
+        guard let win = NSApp.keyWindow else { return }
+        alert.beginSheetModal(for: win) { resp in
+            if resp == .alertSecondButtonReturn {
+                s.doc.isDirty = false
+                workspace.close(s.id)
+            }
+        }
+    }
+
     private func sessionTab(_ s: Session) -> some View {
         let isActive = s.id == workspace.active.id
         return HStack(spacing: 4) {
-            Text(s.title)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .font(.system(size: 11))
-                .foregroundStyle(isActive ? Color.primary : Color.secondary)
-            Button {
-                workspace.close(s.id)
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(Color.secondary.opacity(isActive ? 1 : 0.5))
+            // 独立子视图持有 @ObservedObject，保证 isDirty 变化即时刷新（圆点/×切换）
+            SessionTabLabel(s: s, isActive: isActive, hovered: hoveredTabID == s.id) {
+                requestCloseTab(s)
             }
-            .buttonStyle(.plain)
-            .fixedSize()
-            .help(L("关闭此标签"))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
@@ -245,13 +253,16 @@ struct ContentView: View {
                         lineWidth: isActive ? 1 : 0.5)
         )
         .contentShape(Rectangle())
+        .onHover { hovering in
+            hoveredTabID = hovering ? s.id : (hoveredTabID == s.id ? nil : hoveredTabID)
+        }
         .onTapGesture {
             if let i = workspace.sessions.firstIndex(where: { $0.id == s.id }) {
                 workspace.activeIndex = i
             }
         }
         .contextMenu {
-            Button(L("关闭标签")) { workspace.close(s.id) }
+            Button(L("关闭标签")) { requestCloseTab(s) }
         }
         .onDrag {
             draggingTabID = s.id
@@ -581,6 +592,43 @@ struct ContentView: View {
 
         if pls.isEmpty { throw SealError.badSealImage }
         return (pls, sealImages)
+    }
+}
+
+// MARK: - 标签标题 + 脏标记圆点/关闭钮
+
+/// 单个标签的标题区：独立持有 @ObservedObject，isDirty 变化即时刷新。
+/// 有未保存编辑时右侧显示圆点（悬停时换回 × 以便关闭）；无编辑时正常显示 ×。
+private struct SessionTabLabel: View {
+    @ObservedObject var s: Session
+    let isActive: Bool
+    let hovered: Bool
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(s.title)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .font(.system(size: 11))
+                .foregroundStyle(isActive ? Color.primary : Color.secondary)
+            if s.doc.isDirty && !hovered {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 7, height: 7)
+                    .transition(.opacity)
+                    .help(L("有未保存的编辑"))
+            } else {
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color.secondary.opacity(isActive ? 1 : 0.5))
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+                .help(L("关闭此标签"))
+            }
+        }
     }
 }
 

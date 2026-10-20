@@ -216,7 +216,8 @@ final class CloseGuard: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard let ws = AppDelegate.workspaceRef, ws.active.doc.isDirty else { return true }
+        guard let ws = AppDelegate.workspaceRef,
+              ws.sessions.contains(where: { $0.doc.isDirty }) else { return true }
         let alert = NSAlert()
         alert.messageText = L("该文件尚未保存，是否关闭？")
         alert.alertStyle = .warning
@@ -224,7 +225,7 @@ final class CloseGuard: NSObject, NSWindowDelegate {
         alert.addButton(withTitle: L("确认"))
         alert.beginSheetModal(for: sender) { resp in
             if resp == .alertSecondButtonReturn {
-                ws.active.doc.isDirty = false
+                for s in ws.sessions { s.doc.isDirty = false }
                 sender.close()
             }
         }
