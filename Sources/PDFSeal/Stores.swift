@@ -150,30 +150,45 @@ final class DocumentStore: ObservableObject {
     /// 其余批注原样保留。内存中的文档不受影响（仍可撤销/继续编辑）。
     func writeFlattened(to url: URL) -> Bool {
         guard let d = document else { return false }
+        let t0 = CFAbsoluteTimeGetCurrent()
         let hasRedact = (0..<d.pageCount).contains { i in
             d.page(at: i)?.annotations.contains { $0.userName == Self.redactMarker } ?? false
         }
-        if hasRedact, let (flat, keepers) = Self.flattenRedactions(d) {
+        let t1 = CFAbsoluteTimeGetCurrent()
+        defer { AnnotationPDFView.diag(String(format: "SAVE writeFlattened total=%.0fms (scan=%.0fms flat+write=%.0fms) pages=%d", (CFAbsoluteTimeGetCurrent() - t0) * 1000, (t1 - t0) * 1000, (CFAbsoluteTimeGetCurrent() - t1) * 1000, d.pageCount)) }
+        if hasRedact, let (flat, keepers, sub) = Self.flattenRedactions(d) {
             // ⭐ keepers 必须活到写盘结束：页面挪入 flat 后，其内容流与保留批注的 /AP
             // 外观流仍引用来源文档的 CGPDFSource，来源文档先释放 → 写出扫流即野指针崩溃
             // （SIGSEGV at 0x14/0x1b，PDFSeal-2026-10-20 三份崩溃报告实证）。
+            let t2 = CFAbsoluteTimeGetCurrent()
             let ok = flat.write(to: url)
+            AnnotationPDFView.diag(String(format: "SAVE   flatten sub: %@ | write=%.0fms ok=%d", sub, (CFAbsoluteTimeGetCurrent() - t2) * 1000, ok ? 1 : 0))
             _ = keepers   // 作用域兜底：写盘完成前不释放
             return ok
         }
-        return d.write(to: url)   // 无隐藏批注或压平失败：原样写出兜底
+        let t2 = CFAbsoluteTimeGetCurrent()
+        let ok = d.write(to: url)   // 无隐藏批注或压平失败：原样写出兜底
+        AnnotationPDFView.diag(String(format: "SAVE   direct write=%.0fms ok=%d redact=%d", (CFAbsoluteTimeGetCurrent() - t2) * 1000, ok ? 1 : 0, hasRedact ? 1 : 0))
+        return ok
     }
 
     /// 压平隐藏批注：先整册序列化（让 PDFKit 生成全部外观流），再对含隐藏块的页面
     /// 用 CGContext 重画——只画页面内容 + 按批注颜色填遮盖矩形，其余批注重新挂回注释层。
-    /// 返回 (压平文档, 生命周期依赖)：页面/批注被挪入新文档后仍引用来源文档的
+    /// 返回 (压平文档, 生命周期依赖, 计时分解)：页面/批注被挪入新文档后仍引用来源文档的
     /// CGPDFSource，调用方必须持有这些来源文档直到写盘完成。
-    private static func flattenRedactions(_ d: PDFDocument) -> (PDFDocument, [PDFDocument])? {
+    private static func flattenRedactions(_ d: PDFDocument) -> (PDFDocument, [PDFDocument], String)? {
+        let tA = CFAbsoluteTimeGetCurrent()
         // ① 序列化→读回，确保所有批注外观流已生成（副本可安全改写）
-        guard let data = d.dataRepresentation(), let src = PDFDocument(data: data) else { return nil }
+        guard let data = d.dataRepresentation() else { return nil }
+        let tA2 = CFAbsoluteTimeGetCurrent()
+        guard let src = PDFDocument(data: data) else { return nil }
+        let tB = CFAbsoluteTimeGetCurrent()
         let out = PDFDocument()
         var keepers: [PDFDocument] = [src]
         var any = false
+        var flatPages = 0
+        var drawMs: Double = 0
+        var readbackMs: Double = 0
         for i in 0..<src.pageCount {
             guard let page = src.page(at: i) else { continue }
             let redacts = page.annotations.filter { $0.userName == redactMarker }
@@ -184,13 +199,13 @@ final class DocumentStore: ObservableObject {
             any = true
             let keep = page.annotations.filter { $0.userName != redactMarker }
             for a in page.annotations { page.removeAnnotation(a) }   // 只画页面内容
-            let box = page.bounds(for: .mediaBox)
-            let flatData = NSMutableData()
             var mediaBox = page.bounds(for: .mediaBox)
+            let flatData = NSMutableData()
             guard let consumer = CGDataConsumer(data: flatData as CFMutableData),
                   let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, _: nil) else {
                 out.insert(page, at: i); continue
             }
+            let tC = CFAbsoluteTimeGetCurrent()
             ctx.beginPDFPage(nil)
             page.draw(with: .mediaBox, to: ctx)
             for r in redacts {
@@ -199,6 +214,9 @@ final class DocumentStore: ObservableObject {
             }
             ctx.endPDFPage()
             ctx.closePDF()
+            let tD = CFAbsoluteTimeGetCurrent()
+            drawMs += tD - tC
+            flatPages += 1
             if let flatSrc = PDFDocument(data: flatData as Data), let flatPage = flatSrc.page(at: 0) {
                 keepers.append(flatSrc)                       // flatPage 的内容流引用 flatSrc
                 for a in keep { flatPage.addAnnotation(a) }   // 其余批注挂回注释层，仍可编辑
@@ -206,8 +224,10 @@ final class DocumentStore: ObservableObject {
             } else {
                 out.insert(page, at: i)
             }
+            readbackMs += CFAbsoluteTimeGetCurrent() - tD
         }
-        return any ? (out, keepers) : nil
+        let sub = String(format: "serialize=%.0fms(data=%.1fMB) readback=%.0fms redraw=%dpg/%.0fms pageReadback=%.0fms", (tA2 - tA) * 1000, Double(data.count) / 1048576, (tB - tA2) * 1000, flatPages, drawMs * 1000, readbackMs * 1000)
+        return any ? (out, keepers, sub) : nil
     }
 }
 

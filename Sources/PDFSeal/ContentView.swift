@@ -361,7 +361,9 @@ struct ContentView: View {
     ///    PDFExporter 打不开输入即报「无法打开输入 PDF（可能已加密或损坏）」。
     private func exportPDF() {
         guard let srcURL = doc.url else { errorText = L("请先打开 PDF"); return }
+        let tP0 = CFAbsoluteTimeGetCurrent()
         let base = try? buildPlacements()
+        AnnotationPDFView.diag(String(format: "SAVE buildPlacements=%.0fms (点击另存为→面板弹出前)", (CFAbsoluteTimeGetCurrent() - tP0) * 1000))
         let wmParams = watermarkParams
         let panel = NSSavePanel()
         let stem = srcURL.deletingPathExtension().lastPathComponent
@@ -370,6 +372,8 @@ struct ContentView: View {
         panel.allowedContentTypes = [.pdf]
         panel.beginSheetModal(for: NSApp.mainWindow!) { resp in
             guard resp == .OK, let target = panel.url else { return }
+            let tOK = CFAbsoluteTimeGetCurrent()   // 计时黑匣子：面板确认瞬间
+            AnnotationPDFView.diag(String(format: "SAVE panel-OK t=%.0f hasOverlays=%d", tOK, (!(base?.placements.isEmpty ?? true) || wmParams != nil) ? 1 : 0))
             // 快路径：无章无水印时纯另存——跳过临时基底与逐页压平（实测 228 页/108MB
             // 压平要 4s），有页改动直写目标、无改动字节复制，只剩一次必需的写盘
             let hasOverlays = !(base?.placements.isEmpty ?? true) || wmParams != nil
@@ -407,9 +411,11 @@ struct ContentView: View {
             defer { if let t = tempURL { try? FileManager.default.removeItem(at: t) } }
 
             do {
+                let tE = CFAbsoluteTimeGetCurrent()
                 try PDFExporter.export(input: input, output: target,
                                        placements: base?.placements ?? [], seals: base?.seals ?? [:],
                                        watermark: wmParams?.config, watermarkPages: wmParams?.pages)
+                AnnotationPDFView.diag(String(format: "SAVE   PDFExporter.export=%.0fms afterOK=%.0fms", (CFAbsoluteTimeGetCurrent() - tE) * 1000, (CFAbsoluteTimeGetCurrent() - tOK) * 1000))
                 statusText = LF("已导出：%@", target.lastPathComponent)
                 doc.isDirty = false   // 导出后当前编辑已落盘，视为已保存
             } catch {
