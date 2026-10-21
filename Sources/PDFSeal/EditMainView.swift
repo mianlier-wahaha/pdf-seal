@@ -854,8 +854,8 @@ struct EditMainView: View {
     private var hintText: String {
         switch tool {
         case .pen: return L("在页面上按住拖动进行书写")
-        case .highlight: return L("划选文字即可精准高亮；扫描版页面请拖动绘制")
-        case .underline, .strikeOut: return L("划选文字即可沿线精准批注；扫描版页面请拖动绘制")
+        case .highlight: return L("划选文字精准高亮；扫描版拖动即框选，文字层页面按住 ⌥ 拖动可框选")
+        case .underline, .strikeOut: return L("划选文字精准批注；扫描版拖动即拉线，文字层页面按住 ⌥ 拖动可拉线")
         case .shape: return L("选择工具后在页面上拖动绘制")
         case .eraser: return L("点击或拖过要删除的批注")
         case .textBox: return L("点击页面位置，在弹出的输入框中输入，回车放置")
@@ -1751,6 +1751,9 @@ final class AnnotationPDFView: PDFView {
     private var penPoints: [NSPoint] = []       // 手绘笔采集的页面坐标点列
     /// 文字感知批注进行中：拖动交给 PDFView 原生选字，mouseUp 收割选中行落批注
     private var textSelecting = false
+    /// 划选起点记录（页面坐标）：收割不到任何文字时降级为自由框选/拉线的起点
+    private var textDragPage: PDFPage?
+    private var textDragStart: NSPoint?
     /// 页面文字层探测缓存（page.string 全页取词有成本，mouseMoved 高频调用需要）
     private weak var textProbePage: PDFPage?
     private var textProbeResult = false
@@ -2357,8 +2360,9 @@ final class AnnotationPDFView: PDFView {
             }
             if t == .textBox {
                 applyCursor(.iBeam, "ibeam-text")    // 文本工具空白处 = 可输入
-            } else if toolSupportsTextMarkup, let page = hitPage(atView: vp), pageHasText(page) {
-                applyCursor(.iBeam, "ibeam-markup")  // 高亮/下划线/删除线在文字层页面 = 可划选文字
+            } else if toolSupportsTextMarkup, let page = hitPage(atView: vp), pageHasText(page),
+                      NSApp.currentEvent?.modifierFlags.contains(.option) != true {
+                applyCursor(.iBeam, "ibeam-markup")  // 高亮/下划线/删除线在文字层页面 = 可划选文字（⌥ 按住 = 自由框选/拉线）
             } else {
                 applyCursor(.crosshair, "crosshair")
             }
@@ -2520,9 +2524,12 @@ final class AnnotationPDFView: PDFView {
             return
         }
         // 文字感知批注：高亮/下划线/删除线在文字层页面上改走 PDFView 原生划选，
-        // mouseUp 按选中行逐行精准落批注（严格贴合字形和行）；扫描版（无文字层）仍走自绘
-        if toolSupportsTextMarkup, pageHasText(page) {
+        // mouseUp 按选中行逐行精准落批注（严格贴合字形和行）；扫描版（无文字层）仍走自绘。
+        // ⌥Option 按住 = 强制跳过文字感知、直接框选/拉线（文字层识别不准时的手动出口）
+        if toolSupportsTextMarkup, pageHasText(page), !event.modifierFlags.contains(.option) {
             textSelecting = true
+            textDragPage = page
+            textDragStart = pt
             super.mouseDown(with: event)
             return
         }
@@ -2576,8 +2583,22 @@ final class AnnotationPDFView: PDFView {
     override func mouseUp(with event: NSEvent) {
         if textSelecting {
             textSelecting = false
+            let dragEnd: NSPoint? = textDragPage.map { convert(convert(event.locationInWindow, from: nil), to: $0) }
             super.mouseUp(with: event)
-            harvestTextSelection()
+            let drawn = harvestTextSelection()
+            // 收割不到任何文字（页面文字层无效/选区为空/⌥ 强制跳过）→ 降级自由绘制：
+            // 起点→终点，高亮=框选整块，下划线/删除线=拉直线
+            if drawn == 0, let page = textDragPage, let a = textDragStart, let b = dragEnd,
+               let idx = document.map({ $0.index(for: page) }), idx >= 0,
+               let anno = makeAnnotation(tool: activeTool, page: page, a: a, b: b) {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                page.addAnnotation(anno)
+                CATransaction.commit()
+                onAddAnnotation?(idx, anno)
+            }
+            textDragPage = nil
+            textDragStart = nil
             return
         }
         if selMode != .none || (activeTool == nil && selectedAnno != nil) {
@@ -3277,10 +3298,13 @@ final class AnnotationPDFView: PDFView {
     }
 
     /// 收割当前文字选区：按行（selectionsByLine）生成批注；按页分组入撤销栈（跨页划选每页一条记录）
-    private func harvestTextSelection() {
-        guard let tool = activeTool, toolSupportsTextMarkup, let sel = currentSelection else { return }
+    /// 返回实际落下的批注数（0 = 页面文字层无效/选区为空，调用方可降级自由绘制）
+    @discardableResult
+    private func harvestTextSelection() -> Int {
+        guard let tool = activeTool, toolSupportsTextMarkup, let sel = currentSelection else { return 0 }
         setCurrentSelection(nil, animate: false)   // 先清选区，避免蓝色高亮残留干扰视觉
         var byPage: [Int: (page: PDFPage, annos: [PDFAnnotation])] = [:]
+        var total = 0
         for line in sel.selectionsByLine() {
             guard let page = line.pages.first else { continue }
             let idx = document.map { $0.index(for: page) } ?? -1
@@ -3293,6 +3317,7 @@ final class AnnotationPDFView: PDFView {
             for a in annos {
                 page.addAnnotation(a)
                 byPage[idx, default: (page, [])].annos.append(a)
+                total += 1
             }
             CATransaction.commit()
         }
@@ -3300,6 +3325,7 @@ final class AnnotationPDFView: PDFView {
             onAddBatch?(idx, group.annos)
         }
         if let e = NSApp.currentEvent { updateCursor(at: e) }
+        return total
     }
 
     /// 按选中行的文字框生成批注：
