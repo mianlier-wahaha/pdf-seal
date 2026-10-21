@@ -254,7 +254,6 @@ struct MergeFilesView: View {
     @State private var filename = L("合并")
     @State private var errorText: String?
     @State private var working = false
-    @State private var dropActive = false
     @State private var draggingRow: URL?
     @State private var dragOverRow: URL?
 
@@ -300,17 +299,11 @@ struct MergeFilesView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .overlay {
-            if dropActive {
-                RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 2)
-                    .padding(8).allowsHitTesting(false)
-            }
-        }
         .dropDestination(for: URL.self) { urls, _ in
             let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
             files.append(contentsOf: pdfs)
             return !pdfs.isEmpty
-        } isTargeted: { dropActive = $0 }
+        }
     }
 
     private var dropArea: some View {
