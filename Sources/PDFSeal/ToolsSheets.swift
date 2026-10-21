@@ -256,6 +256,15 @@ struct MergeFilesView: View {
     @State private var working = false
     @State private var draggingRow: URL?
     @State private var dragOverRow: URL?
+    @State private var saveDir: URL?   // nil = 默认（第一个文件所在目录，无文件时用「下载」）
+
+    /// 当前生效的保存目录
+    private var effectiveSaveDir: URL {
+        saveDir
+            ?? files.first?.deletingLastPathComponent()
+            ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -406,6 +415,21 @@ struct MergeFilesView: View {
             .opacity(unified ? 1 : 0.35)
             .disabled(!unified)
 
+            Text(L("保存路径")).font(.subheadline).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text(effectiveSaveDir.path)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button(L("浏览…")) { chooseSaveDir() }
+                    .fixedSize()
+                    .handCursor()
+            }
+            .padding(6)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
+
             Text(L("文件名")).font(.subheadline).foregroundStyle(.secondary)
             TextField(L("合并"), text: $filename)
                 .textFieldStyle(.roundedBorder)
@@ -413,10 +437,6 @@ struct MergeFilesView: View {
             Spacer()
 
             HStack(spacing: 10) {
-                Button(L("取消")) { dismiss() }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .handCursor()
                 Button {
                     applyMerge()
                 } label: {
@@ -428,6 +448,10 @@ struct MergeFilesView: View {
                 .keyboardShortcut(.defaultAction)   // 应用为默认项（回车触发）
                 .disabled(files.count < 2 || working)
                 .handCursor()
+                Button(L("取消")) { dismiss() }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .handCursor()
             }
 
             if working { ProgressView().progressViewStyle(.linear) }
@@ -448,6 +472,17 @@ struct MergeFilesView: View {
         }
     }
 
+    /// 选择保存目录（文件夹面板）
+    private func chooseSaveDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = effectiveSaveDir
+        guard panel.runModal() == .OK, let dir = panel.url else { return }
+        saveDir = dir
+    }
+
     private func applyMerge() {
         let targetSize: CGSize? = unified ? {
             var size = PagePreset.pt(wCm: widthCm, hCm: heightCm)
@@ -455,12 +490,16 @@ struct MergeFilesView: View {
             return size
         }() : nil
         let urls = files
-        let name = filename.isEmpty ? L("合并") : filename
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.nameFieldStringValue = name + ".pdf"
-        panel.directoryURL = urls.first?.deletingLastPathComponent()
-        guard panel.runModal() == .OK, let target = panel.url else { return }
+        let baseName = filename.isEmpty ? L("合并") : filename
+        let dir = effectiveSaveDir
+        // 目标文件已存在时自动顺延（合并 2、合并 3…），避免静默覆盖
+        var target = dir.appendingPathComponent(baseName + ".pdf")
+        var n = 2
+        let fm = FileManager.default
+        while fm.fileExists(atPath: target.path) {
+            target = dir.appendingPathComponent("\(baseName) \(n).pdf")
+            n += 1
+        }
         working = true
         DispatchQueue.global(qos: .userInitiated).async {
             do {
