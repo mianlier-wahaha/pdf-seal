@@ -255,6 +255,8 @@ struct MergeFilesView: View {
     @State private var errorText: String?
     @State private var working = false
     @State private var dropActive = false
+    @State private var draggingRow: URL?
+    @State private var dragOverRow: URL?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -324,6 +326,10 @@ struct MergeFilesView: View {
 
     private func fileRow(_ i: Int, _ url: URL) -> some View {
         HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .help(L("拖动调整顺序"))
             Image(systemName: "doc").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(url.deletingPathExtension().lastPathComponent)
@@ -344,7 +350,23 @@ struct MergeFilesView: View {
         .buttonStyle(.plain)
         .handCursor()
         .padding(8)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
+        .background(RoundedRectangle(cornerRadius: 6)
+            .fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay {
+            // 拖拽悬停指示：拖到某行上方时该行描蓝边
+            if dragOverRow == url && draggingRow != url {
+                RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 2)
+            }
+        }
+        .opacity(draggingRow == url ? 0.4 : 1)
+        .onDrag {
+            draggingRow = url
+            return NSItemProvider(object: url.absoluteString as NSString)
+        }
+        .onDrop(of: [.text], delegate: FileReorderDelegate(target: url,
+                                                           files: $files,
+                                                           dragging: $draggingRow,
+                                                           hovering: $dragOverRow))
     }
 
     private func pageSummary(_ url: URL) -> String {
@@ -397,16 +419,23 @@ struct MergeFilesView: View {
 
             Spacer()
 
-            Button {
-                applyMerge()
-            } label: {
-                Text(working ? L("正在保存…") : L("应用"))
+            HStack(spacing: 10) {
+                Button(L("取消")) { dismiss() }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
+                    .handCursor()
+                Button {
+                    applyMerge()
+                } label: {
+                    Text(working ? L("正在保存…") : L("应用"))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)   // 应用为默认项（回车触发）
+                .disabled(files.count < 2 || working)
+                .handCursor()
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(files.count < 2 || working)
-            .handCursor()
 
             if working { ProgressView().progressViewStyle(.linear) }
         }
@@ -458,6 +487,39 @@ struct MergeFilesView: View {
                 }
             }
         }
+    }
+}
+
+/// 文件列表行拖拽排序（payload 用 text 类型，避免命中外层「拖入文件」的 URL dropDestination）
+private struct FileReorderDelegate: DropDelegate {
+    let target: URL
+    @Binding var files: [URL]
+    @Binding var dragging: URL?
+    @Binding var hovering: URL?
+
+    func validateDrop(info: DropInfo) -> Bool { dragging != nil }
+
+    func dropEntered(info: DropInfo) {
+        hovering = target
+        guard let dragging, dragging != target,
+              let from = files.firstIndex(of: dragging),
+              let to = files.firstIndex(of: target) else { return }
+        withAnimation(.easeInOut(duration: 0.15)) {
+            files.move(fromOffsets: IndexSet(integer: from),
+                       toOffset: to > from ? to + 1 : to)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        hovering = nil
+        return true
+    }
+
+    func dropExited(info: DropInfo) {
+        if hovering == target { hovering = nil }
     }
 }
 
