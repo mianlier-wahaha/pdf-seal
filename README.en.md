@@ -24,6 +24,7 @@ A lightweight native macOS PDF toolbox (formerly "PDF Seal") with four sections:
 ### Body Stamps
 - Click anywhere on a page to place a stamp; add as many as you need
 - Select a stamp to reveal the control frame: drag to move, bottom-right handle to resize
+- **Rotation**: ↺ / ↻ buttons (15° steps, hold ⌥ for 1° fine steps) + a 0–180° slider with live preview
 - Every stamp instance **locks in the seal used at creation time** — switching the library selection never affects placed stamps
 - Per-page **delete / restore** (context menu)
 - `⌘Z` / `Ctrl+Z` undoes the last move / resize
@@ -40,11 +41,15 @@ A lightweight native macOS PDF toolbox (formerly "PDF Seal") with four sections:
 - **Drag to reorder** seals, or reorder with ↑ / ↓ keys; library column width adjustable (150–420pt)
 - Context-menu rename; library persists across launches
 
+### Merge & Convert ("Tools" menu / workspace hub shortcuts)
+- **Merge files**: add multiple / drag in / drag to reorder; page size: keep original or unify (A3/A4/A5/B5/Letter presets or custom W×H in cm, portrait/landscape); the save folder defaults to the first file's directory and can be changed via "Browse…"; applying writes directly without a save panel — duplicate names are auto-suffixed (merged 2, merged 3…)
+- **Convert PDF**: blank pages (preset size + orientation + count), from images / clipboard / files, from Word / Excel / PowerPoint (via Office), batch conversion of multiple PDFs; results open in a new tab automatically
+
 ### Preview & Files
-- Multi-tab workspace: open several PDFs at once; drag tabs to reorder, × to close
+- Multi-tab workspace: open several PDFs at once; drag tabs to reorder, × to close; unsaved tabs show a dot marker and confirm before closing
 - Zoom: pinch gesture / text field / presets (25%–200%)
 - Page jumping, bottom status bar
-- Save (overwrite) / Save As / Close
+- Save (overwrite) / Save As / Close; large files save in the background with a progress bar
 - "More" menu: compress, password encryption, export as images, image-based PDF
 - WYSIWYG preview matching exported output (including opacity)
 - `Esc` deselects
@@ -58,14 +63,14 @@ A lightweight native macOS PDF toolbox (formerly "PDF Seal") with four sections:
 - Print (`⌘P`)
 
 ### Edit (Annotations)
-- **Highlight**: adjustable color / opacity
-- **Underline / strikeout**: incl. wavy style; color and line width match output exactly
+- **Highlight / underline / strikeout**: on pages with a text layer, **select text** to place annotations line by line (underline incl. wavy style; color and line width match output exactly); on scanned or unreadable pages it automatically falls back to drag-to-draw boxes / lines — hold ⌥ to force free drawing
 - **Pen**: freehand drawing with adjustable color / width
 - **Shapes**: rectangle / ellipse / line / arrow / double arrow, with border style, line width, fill color and fill pattern
-- **Text box**: font / size / color / background color / 90° rotation, live preview while typing
-- **Redact** (cover-up): optional fill color, flattened automatically on save
+- **Text box**: font / size / color / background color / 90° rotation, live preview while typing; **double-click** a text annotation to edit it in place
+- **Redact** (cover-up): optional fill color, flattened automatically on save; optional "same position on every page" to cover all pages at once
 - **Eraser**: erase whole strokes or just the touched part (strokes split automatically)
 - **Annotation selection**: hovering shows a pointing hand → click to show handles; move, 8-handle resize (rect/ellipse), endpoint dragging (lines/arrows), rotation (text), delete (`Delete` or ✕); handles show direction-aware resize cursors
+- **`Shift` modifiers**: hold `Shift` while dragging a corner handle to keep the aspect ratio; hold `Shift` while drawing rectangles / ellipses for squares / circles; press `Esc` mid-draw to discard the gesture
 - **Global undo / redo / undo all** (`⌘Z` / `⇧⌘Z`): one unified timeline for annotations, stamps and page operations, effective in every section
 
 ## Usage
