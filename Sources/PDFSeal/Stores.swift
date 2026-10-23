@@ -893,6 +893,15 @@ final class StampSettings: ObservableObject {
         fullHeightCm = fullStamps[i].heightCm
     }
 
+    /// 调整指定章的旋转角度（按 180° 取模循环，负角折回正区间）
+    func setRotation(_ degrees: Double, of id: UUID) {
+        guard let i = fullStamps.firstIndex(where: { $0.id == id }) else { return }
+        var r = degrees.truncatingRemainder(dividingBy: 180)
+        if r < 0 { r += 180 }
+        fullStamps[i].rotation = r
+        fullRotation = r   // 模板值跟随，下一枚同角度
+    }
+
     /// 「添加」按钮：按当前模板选项新增一枚章实例
     /// - Parameter sealID: 该章锁定的印章
     /// - Parameter pageIndex: 提供 时，新章仅覆盖该页并落在 anchor 处（点击落章）
