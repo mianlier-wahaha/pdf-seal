@@ -50,12 +50,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 AnnotationPDFView.runCursorScrollProbe()
             }
         }
+        // 临时探针：窗口红X关闭拦截链路实证（开 PDF → 置脏 → performClose）
+        if ProcessInfo.processInfo.arguments.contains("--probe-close") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.openDocument(at: URL(fileURLWithPath: "/tmp/mpdf_test.pdf"))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        MainActor.assumeIsolated {
+                            guard let ws = AppDelegate.workspaceRef, let s = ws.sessions.last else {
+                                uitestLog("[PROBE-CLOSE] no session"); return
+                            }
+                            s.doc.isDirty = true
+                            NSApp.activate(ignoringOtherApps: true)
+                            let win = NSApp.windows.first { $0.isVisible && $0.canBecomeMain }
+                            uitestLog("[PROBE-CLOSE] dirty set, sessions=%@, windows=%@, main=%@, delegate=%@",
+                                      String(ws.sessions.count), String(NSApp.windows.count),
+                                      win.map { String(describing: ObjectIdentifier($0)) } ?? "nil",
+                                      String(describing: win?.delegate))
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                MainActor.assumeIsolated {
+                                    uitestLog("[PROBE-CLOSE] performClose ->")
+                                    win?.performClose(nil)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                        MainActor.assumeIsolated {
+                                            uitestLog("[PROBE-CLOSE] after: mainWindow visible=%@, stillExists=%@",
+                                                      win?.isVisible == true ? "yes" : "no",
+                                                      NSApp.windows.contains(where: { $0 === win }) ? "yes" : "no")
+                                            NSApp.terminate(nil)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private func installIfNeeded() {
         // 监听器必须同时具备 workspace 引用且尚未安装，才安装一次；重复调用为无操作。
         guard keyMonitor == nil, flagsMonitor == nil,
               seals != nil, workspace != nil else { return }
+
+        // 窗口关闭守卫常驻监听：SwiftUI 每次状态刷新都会把 window.delegate 夺回
+        // AppKitWindowController，导致 CloseGuard.windowShouldClose 失效（红绿灯 ✕
+        // 不弹未保存确认）。didUpdate 每次窗口更新回调里做一次指针比较，被夺回即抢回。
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didUpdateNotification, object: nil, queue: .main
+        ) { note in
+            MainActor.assumeIsolated {
+                if let win = note.object as? NSWindow {
+                    CloseGuard.shared.attachIfAppropriate(win)
+                }
+            }
+        }
+        // 兜底轮询：窗口静默（无重绘）期间 didUpdate 不触发，SwiftUI 夺回后抢不回；
+        // 0.5s 定时把所有可见窗口的 delegate 重新归位（纯指针比较，成本可忽略）。
+        let guardTimer = Timer(timeInterval: 0.5, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                for win in NSApp.windows where win.isVisible {
+                    CloseGuard.shared.attachIfAppropriate(win)
+                }
+            }
+        }
+        RunLoop.main.add(guardTimer, forMode: .common)
 
         // macOS 27 PDFKit 注记马赛克修复（私有层 contentsScale=1.0 + nearest 采样系统 bug）
         PDFKitAnnotationQualityFix.install()
@@ -194,6 +253,8 @@ final class CloseGuard: NSObject, NSWindowDelegate {
     /// 而 NSWindow.title 不支持 KVO（observe(\.title) 收不到回调），故改用
     /// NSWindowDidChangeTitleNotification：标题一变且非空立即清空并隐藏；
     /// 清空为空串触发的下一次通知因 title 为空直接返回，循环自然终止。
+    /// ⚠️ SwiftUI 会在状态刷新时把 window.delegate 夺回 AppKitWindowController，
+    /// 挂一次必被覆盖——需配合 didUpdate 常驻守卫（见 AppDelegate 监听）。
     func attach(to window: NSWindow) {
         if window.delegate !== self {
             previous = window.delegate
@@ -215,9 +276,25 @@ final class CloseGuard: NSObject, NSWindowDelegate {
         if !window.title.isEmpty { window.title = "" }
     }
 
+    /// didUpdate 常驻守卫入口：只接管「SwiftUI WindowGroup 主窗口」，不碰面板/sheet。
+    /// ⚠️ 判定具体类不能用 type(of: win.delegate)——existential 包装会返回
+    /// "Optional<NSWindowDelegate>" 而非具体类名；须用 String(describing: win?.delegate)。
+    func attachIfAppropriate(_ win: NSWindow) {
+        if win.delegate === self { return }   // 常态快路径：已接管，零成本返回
+        guard !(win is NSPanel), win.sheetParent == nil, win.isVisible else { return }
+        // 取具体类名：existential 须先转 AnyObject 再 type(of:)，否则拿到 "Optional<NSWindowDelegate>"
+        let desc = win.delegate.map { "\(type(of: $0 as AnyObject))" } ?? "nil"
+        guard desc == "nil" || desc.contains("AppKitWindowController") else { return }
+        attach(to: win)
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        uitestLog("[CLOSE-GUARD] windowShouldClose fired")
         guard let ws = AppDelegate.workspaceRef,
-              ws.sessions.contains(where: { $0.doc.isDirty }) else { return true }
+              ws.sessions.contains(where: { $0.doc.isDirty }) else {
+            uitestLog("[CLOSE-GUARD] guard passed (no dirty), close allowed")
+            return true
+        }
         let alert = NSAlert()
         alert.messageText = L("该文件尚未保存，是否关闭？")
         alert.alertStyle = .warning
@@ -241,9 +318,24 @@ final class CloseGuard: NSObject, NSWindowDelegate {
     override func forwardingTarget(for aSelector: Selector!) -> Any? { previous }
 }
 
-/// 透明 NSView，仅在 updateNSView 时把窗口 delegate 切换到 CloseGuard（幂等）。
+/// 透明 NSView：视图挂进窗口层级时（viewDidMoveToWindow 系统必回调）把窗口 delegate
+/// 切到 CloseGuard。不能用 updateNSView 时机——SwiftUI 对无参 representable 只在
+/// 首次布局时调一次，此时 background 视图尚未进 window（window=nil），之后不再刷新，
+/// 导致红绿灯 ✕ 关闭拦截从未生效（探针实证）。
 struct WindowAccessor: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { NSView() }
+    final class CloseAttachView: NSView {
+        override func viewDidMoveToWindow() {
+            if let win = window {
+                MainActor.assumeIsolated {
+                    CloseGuard.shared.attach(to: win)
+                    win.title = ""
+                    win.titleVisibility = .hidden   // 顶栏左侧不留标题文字
+                }
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView { CloseAttachView() }
     func updateNSView(_ nsView: NSView, context: Context) {
         // 本方法非 actor 隔离，但 SwiftUI 保证在主线程调用；切换窗口 delegate 需 @MainActor
         MainActor.assumeIsolated {

@@ -2,6 +2,13 @@
 
 所有重要改动记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [2.10.10] - 2026-10-23
+
+### 修复
+- **窗口红绿灯 ✕ 关闭不再丢失未保存提示**：文档有未保存改动时点标题栏红 ✕ 现在会弹出「该文件尚未保存，是否关闭？」确认（与标签 ✕ 同口径），确认后才关闭
+- 根因：SwiftUI 在每次状态刷新时会把窗口 delegate 夺回（AppKitWindowController），此前一次性挂载的关闭守卫随即失效；且视图初始化时窗口尚未创建，守卫从未挂上
+- 修复：挂载时机改用 `viewDidMoveToWindow`（视图进窗口层级系统必回调），并新增 `NSWindow.didUpdateNotification` 监听 + 0.5s 轻量轮询双保险——delegate 被 SwiftUI 夺回后立即抢回（纯指针比较，成本可忽略）
+
 ## [2.10.9] - 2026-10-23
 
 ### 改进

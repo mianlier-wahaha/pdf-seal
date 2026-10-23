@@ -1154,6 +1154,7 @@ let uitestEnabled: Bool = {
     let args = ProcessInfo.processInfo.arguments
     return ProcessInfo.processInfo.environment["MPDF_UITEST"] != nil
         || args.contains("--uitest") || args.contains("--probe")
+        || args.contains("--probe-close")
 }()
 
 /// 临时 UITEST：直接写文件日志（open 启动时 stderr/统一日志都拿不到）
