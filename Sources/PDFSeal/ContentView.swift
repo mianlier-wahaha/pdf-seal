@@ -521,19 +521,17 @@ struct ContentView: View {
 
     // MARK: 打印
 
-    /// 系统打印：用离屏 PDFView 承载文档，交给 NSPrintOperation 走系统打印面板
+    /// 系统打印：自研逐页打印视图交给 NSPrintOperation。
+    /// ⚠️ 不能用离屏 PDFView——它懒加载，从未上屏就不渲染页面，打印出来是灰块单页（v2.10.6 前的 bug）。
     private func printPDF() {
         guard let d = doc.document, let win = appContentWindow() ?? NSApp.mainWindow else { return }
-        let pv = PDFView()
-        pv.document = d.copy() as? PDFDocument   // 用副本打印，避免打印过程触碰原文档
-        pv.autoScales = true
-        pv.frame = NSRect(x: 0, y: 0, width: 612, height: 792)
         let info = NSPrintInfo()
         info.horizontalPagination = .fit
         info.verticalPagination = .automatic
         info.isHorizontallyCentered = true
         info.isVerticallyCentered = false
-        let op = NSPrintOperation(view: pv, printInfo: info)
+        let op = NSPrintOperation(view: PrintPDFView(document: d.copy() as? PDFDocument ?? d),
+                                  printInfo: info)
         op.showsPrintPanel = true
         op.runModal(for: win, delegate: nil, didRun: nil, contextInfo: nil)
     }
@@ -747,5 +745,58 @@ private struct LibraryWidthDivider: View {
                 }
         )
         .accessibilityLabel("调整印章库宽度")
+    }
+}
+
+// MARK: - 打印专用视图
+
+/// 逐页直绘 PDF 的打印视图：knowsPageRange/rectForPage 报告真实页数与页尺寸，
+/// draw 按 NSPrintOperation 当前页号用 PDFPage.draw 渲染（含批注），白底兜底。
+final class PrintPDFView: NSView {
+    private let document: PDFDocument
+    private let pageRects: [NSRect]
+
+    init(document: PDFDocument) {
+        self.document = document
+        let first = document.page(at: 0)?.bounds(for: .mediaBox).size
+            ?? NSSize(width: 612, height: 792)
+        var computed: [NSRect] = []
+        for i in 0..<max(document.pageCount, 0) {
+            let b = document.page(at: i)?.bounds(for: .mediaBox)
+            computed.append(NSRect(origin: .zero, size: b?.size ?? first))
+        }
+        pageRects = computed
+        super.init(frame: NSRect(origin: .zero, size: first))
+    }
+
+    required init?(coder: NSCoder) { fatalError("不支持") }
+
+    /// 打印分页 = PDF 真实页数（1-based）
+    override func knowsPageRange(_ range: NSRangePointer) -> Bool {
+        guard document.pageCount > 0 else { return false }
+        range.pointee.location = 1
+        range.pointee.length = document.pageCount
+        return true
+    }
+
+    /// 每页打印矩形 = 该页 mediaBox 尺寸（PDF 点 = 打印 1/72 英寸，天然 1:1）
+    override func rectForPage(_ page: Int) -> NSRect {
+        pageRects.indices.contains(page - 1) ? pageRects[page - 1]
+            : NSRect(origin: .zero, size: frame.size)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // 白底：PDF 页面空白处打印为白而非透明
+        NSColor.white.setFill()
+        bounds.fill()
+        let idx = (NSPrintOperation.current?.currentPage ?? 1) - 1
+        guard idx >= 0, idx < document.pageCount,
+              let page = document.page(at: idx),
+              let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.saveGState()
+        let b = page.bounds(for: .mediaBox)
+        ctx.translateBy(x: -b.origin.x, y: -b.origin.y)   // mediaBox 原点非 0 的页对齐到打印原点
+        page.draw(with: .mediaBox, to: ctx)
+        ctx.restoreGState()
     }
 }
