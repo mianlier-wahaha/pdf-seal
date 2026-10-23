@@ -10,12 +10,6 @@ struct ParamsPanelView: View {
     @State private var sizeDragID: UUID?
     @State private var rotDragID: UUID?
 
-    /// ↺/↻ 按钮步进旋转：一次点击记一条撤销快照
-    private func nudgeRotation(inst: FullStampInstance, delta: Double) {
-        settings.pushUndo(inst.id)
-        settings.setRotation(inst.rotation + delta, of: inst.id)
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             Form {
@@ -182,31 +176,17 @@ struct ParamsPanelView: View {
                                     }
                                     sizeDragID = nil
                                 })
-                                // 旋转：与章体大小之间加分隔线；按钮上移到标签行（左转/右转），滑杆独占整行
+                                // 旋转：与章体大小之间加分隔线；滑杆中点 = 0°，右拖顺时针（正）/ 左拖逆时针（负），两端 ±180°
                                 Divider()
                                 HStack {
                                     Text(L("旋转角度")).font(.callout)
+                                    Spacer()
                                     Text(String(format: "%d°", Int(inst.rotation.rounded())))
                                         .font(.caption).monospacedDigit()
                                         .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button {
-                                        nudgeRotation(inst: inst, delta: NSApp.currentEvent?.modifierFlags.contains(.option) == true ? -1 : -15)
-                                    } label: {
-                                        Label(L("左转"), systemImage: "rotate.counterclockwise")
-                                    }
-                                    .help(L("逆时针旋转（按住 ⌥ 微调 1°）"))
-                                    .handCursor()
-                                    Button {
-                                        nudgeRotation(inst: inst, delta: NSApp.currentEvent?.modifierFlags.contains(.option) == true ? 1 : 15)
-                                    } label: {
-                                        Label(L("右转"), systemImage: "rotate.clockwise")
-                                    }
-                                    .help(L("顺时针旋转（按住 ⌥ 微调 1°）"))
-                                    .handCursor()
                                 }
                                 OffsetSlider(value: inst.rotation,
-                                             range: 0...180,
+                                             range: -180...180,
                                              onChanged: { v in
                                     if rotDragID != inst.id {
                                         settings.pushUndo(inst.id)   // 本次调整开始前记快照

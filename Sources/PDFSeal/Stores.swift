@@ -893,13 +893,13 @@ final class StampSettings: ObservableObject {
         fullHeightCm = fullStamps[i].heightCm
     }
 
-    /// 调整指定章的旋转角度（按 180° 取模循环，负角折回正区间）
+    /// 调整指定章的旋转角度：滑杆中点 0°，右拖顺时针（正）/ 左拖逆时针（负），归一化到 [-180, 180)
     func setRotation(_ degrees: Double, of id: UUID) {
         guard let i = fullStamps.firstIndex(where: { $0.id == id }) else { return }
-        var r = degrees.truncatingRemainder(dividingBy: 180)
-        if r < 0 { r += 180 }
-        fullStamps[i].rotation = r
-        fullRotation = r   // 模板值跟随，下一枚同角度
+        var r = (degrees + 180).truncatingRemainder(dividingBy: 360)
+        if r < 0 { r += 360 }
+        fullStamps[i].rotation = r - 180
+        fullRotation = fullStamps[i].rotation   // 模板值跟随，下一枚同角度
     }
 
     /// 「添加」按钮：按当前模板选项新增一枚章实例
