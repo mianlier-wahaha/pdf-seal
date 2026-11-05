@@ -1638,12 +1638,20 @@ struct AnnotationPageView: NSViewRepresentable {
     let onAdded: () -> Void
 
     @EnvironmentObject private var doc: DocumentStore
+    @EnvironmentObject private var stampSettings: StampSettings
+    @EnvironmentObject private var seals: SealStore
 
     func makeNSView(context: Context) -> AnnotationPDFView {
         let v = AnnotationPDFView()
         v.displayMode = .singlePageContinuous
         v.autoScales = true
         v.document = doc.document
+        // 印章幽灵层：盖章界面落的章在编辑界面同样可见（只读、不挡交互）
+        let ghost = SealGhostOverlay(frame: v.bounds)
+        ghost.host = v
+        v.addSubview(ghost)
+        ghost.attach(to: v)
+        v.sealGhost = ghost
         v.readSettings = { [binding = $settings] in binding.wrappedValue }
         v.onAddAnnotation = { pageIdx, anno in
             AnnotationUndoStack.shared.push(document: doc.document!, pageIndex: pageIdx, action: .added(anno))
@@ -1701,6 +1709,15 @@ struct AnnotationPageView: NSViewRepresentable {
         if v.document !== doc.document {
             v.document = doc.document
         }
+        // 章数据变化（落章/移动/删除/换文档）→ 幽灵层同步
+        if let ghost = v.sealGhost {
+            if let (pls, imgs) = try? StampPlanner.build(settings: stampSettings, seals: seals,
+                                                         pageSizes: doc.pageSizes, pageCount: doc.pageCount) {
+                ghost.sync(placements: pls, images: imgs)
+            } else {
+                ghost.sync(placements: [], images: [:])
+            }
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -1720,6 +1737,8 @@ struct AnnotationPageView: NSViewRepresentable {
 /// 支持批注绘制的 PDFView：工具激活时接管鼠标，拖出页面空间矩形/线段/笔迹
 final class AnnotationPDFView: PDFView {
     var activeTool: EditTool? = nil
+    /// 编辑视图的印章幽灵层（盖章界面落的章在此只读显示）
+    var sealGhost: SealGhostOverlay? = nil
     /// 实时读取 SwiftUI @State（鼠标事件时无需等 updateNSView 刷新）
     var readSettings: (() -> ToolSettings?)? = nil
     var cachedSettings = ToolSettings()

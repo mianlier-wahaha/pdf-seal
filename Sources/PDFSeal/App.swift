@@ -24,7 +24,8 @@ struct PDFSealApp: App {
         }
         .windowToolbarStyle(.unifiedCompact)   // 紧凑顶栏：压缩垂直占用
         .commands {
-            // 文件菜单：「新建窗口」之后、「关闭」之前加 打开/保存/另存为（动作由 ContentView 执行）
+            // 文件菜单：「新建窗口」之后、「关闭」之前加 打开/保存/另存为 + 工具栏已有功能
+            // （只收录实际存在的功能，没有的项不占位）
             CommandGroup(after: .newItem) {
                 Button(L("打开")) { NotificationCenter.default.post(name: .menuOpenPDF, object: nil) }
                     .keyboardShortcut("o")
@@ -32,25 +33,36 @@ struct PDFSealApp: App {
                     .keyboardShortcut("s")
                 Button(L("另存为")) { NotificationCenter.default.post(name: .menuSaveAsPDF, object: nil) }
                     .keyboardShortcut("s", modifiers: [.command, .shift])
+                Divider()
+                Button(L("打印…")) { NotificationCenter.default.post(name: .menuPrintPDF, object: nil) }
+                    .keyboardShortcut("p")
+                Button(L("分享")) { NotificationCenter.default.post(name: .menuSharePDF, object: nil) }
+                Divider()
+                Button(L("压缩大小…")) {
+                    NotificationCenter.default.post(name: .menuExportTool, object: ExportToolKind.compress.rawValue)
+                }
+                Button(L("设置密码…")) {
+                    NotificationCenter.default.post(name: .menuExportTool, object: ExportToolKind.encrypt.rawValue)
+                }
+                Button(L("导出为图片…")) {
+                    NotificationCenter.default.post(name: .menuExportTool, object: ExportToolKind.images.rawValue)
+                }
+                Button(L("图像型 PDF…")) {
+                    NotificationCenter.default.post(name: .menuExportTool, object: ExportToolKind.imagePDF.rawValue)
+                }
+                Divider()
+                Button(L("合并文件…")) { NotificationCenter.default.post(name: .menuMergeFiles, object: nil) }
+                Menu(L("创建 PDF")) {
+                    Button(L("从图像创建")) { NotificationCenter.default.post(name: .menuImagesToPDF, object: nil) }
+                    Button(L("从剪贴板创建")) { NotificationCenter.default.post(name: .menuClipboardToPDF, object: nil) }
+                }
             }
-            // 工具菜单：只收录本 app 已有的功能入口（没有的项不占位）
+            // 工具菜单：视图入口（标记密文 = 密文擦除，永久删除选中区域的文字与图像）
             CommandMenu(L("工具")) {
                 Button(L("编辑 PDF")) { NotificationCenter.default.post(name: .menuToolEdit, object: nil) }
                 Button(L("标记密文")) { NotificationCenter.default.post(name: .menuToolRedact, object: nil) }
                 Button(L("组织页面")) { NotificationCenter.default.post(name: .menuToolPageManage, object: nil) }
                 Button(L("水印")) { NotificationCenter.default.post(name: .menuToolStamp, object: nil) }
-                Divider()
-                Button(L("合并文件…")) { NotificationCenter.default.post(name: .menuMergeFiles, object: nil) }
-                Menu(L("创建 PDF")) {
-                    Button(L("空白页面")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
-                    Button(L("从文件创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
-                    Button(L("从图像创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
-                    Button(L("从剪贴板创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
-                    Divider()
-                    Button(L("从 Word 创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
-                    Button(L("从 Excel 创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
-                    Button(L("从 PowerPoint 创建 PDF")) { NotificationCenter.default.post(name: .menuCreatePDF, object: nil) }
-                }
             }
         }
     }
@@ -60,11 +72,16 @@ extension Notification.Name {
     static let menuOpenPDF = Notification.Name("PDFSeal.menuOpenPDF")
     static let menuSavePDF = Notification.Name("PDFSeal.menuSavePDF")
     static let menuSaveAsPDF = Notification.Name("PDFSeal.menuSaveAsPDF")
+    // 文件菜单扩展（v2.11.8）：打印 / 分享 / 导出工具箱
+    static let menuPrintPDF = Notification.Name("PDFSeal.menuPrintPDF")
+    static let menuSharePDF = Notification.Name("PDFSeal.menuSharePDF")
+    static let menuExportTool = Notification.Name("PDFSeal.menuExportTool")   // object = ExportToolKind.rawValue
     // 工具菜单（v2.10.0）
     static let menuToolEdit = Notification.Name("PDFSeal.menuToolEdit")
     static let menuToolRedact = Notification.Name("PDFSeal.menuToolRedact")
     static let menuToolPageManage = Notification.Name("PDFSeal.menuToolPageManage")
     static let menuToolStamp = Notification.Name("PDFSeal.menuToolStamp")
     static let menuMergeFiles = Notification.Name("PDFSeal.menuMergeFiles")
-    static let menuCreatePDF = Notification.Name("PDFSeal.menuCreatePDF")
+    static let menuImagesToPDF = Notification.Name("PDFSeal.menuImagesToPDF")
+    static let menuClipboardToPDF = Notification.Name("PDFSeal.menuClipboardToPDF")
 }

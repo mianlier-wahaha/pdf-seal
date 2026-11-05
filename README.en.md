@@ -60,6 +60,7 @@ A lightweight native macOS PDF toolbox (formerly "PDF Seal") with four sections:
 - Insert: from file / clipboard image / blank pages, with **interleaved insert** (odd-even positions + reverse order, with a diagram)
 - Rotate / delete / extract selected pages; reverse all with one click
 - Split: by page count / by file size, with background size estimation in the dialog
+- **Convert to Black & White**: redraw selected pages (or all pages if none selected) as grayscale via the system Gray Tone filter — colors only, text layer and annotations kept intact, file size stays about the same; with progress, cancellable and undoable
 - Print (`⌘P`)
 
 ### Edit (Annotations)

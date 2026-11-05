@@ -40,7 +40,8 @@ struct WorkspaceHomeView: View {
     let onOpen: (URL) -> Void
     let onPick: () -> Void
     var onMerge: () -> Void = {}
-    var onCreate: () -> Void = {}
+    var onImages: () -> Void = {}
+    var onClipboard: () -> Void = {}
 
     @State private var recents: [URL] = RecentFiles.urls()
     @State private var thumbs: [String: NSImage] = [:]
@@ -95,7 +96,7 @@ struct WorkspaceHomeView: View {
         .onAppear { recents = RecentFiles.urls() }
     }
 
-    // MARK: 快速工具：合并文件 / 转换 PDF（无需先打开文档）
+    // MARK: 快速工具：合并文件 / 从图像创建 / 从剪贴板创建（无需先打开文档）
 
     private var quickTools: some View {
         HStack(spacing: 12) {
@@ -103,10 +104,14 @@ struct WorkspaceHomeView: View {
                       title: L("合并文件"),
                       subtitle: L("多个 PDF 合并为一个"),
                       action: onMerge)
-            quickCard(icon: "arrow.2.squarepath",
-                      title: L("转换 PDF"),
-                      subtitle: L("空白页 / 图像 / Word / Excel / PPT / 剪贴板"),
-                      action: onCreate)
+            quickCard(icon: "photo.on.rectangle",
+                      title: L("从图像创建"),
+                      subtitle: L("多张图片合并为一个 PDF"),
+                      action: onImages)
+            quickCard(icon: "doc.on.clipboard",
+                      title: L("从剪贴板创建"),
+                      subtitle: L("剪贴板图片转为 PDF，可选比例"),
+                      action: onClipboard)
         }
     }
 

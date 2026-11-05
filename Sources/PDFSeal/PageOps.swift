@@ -4,6 +4,7 @@ import AppKit
 import CoreGraphics
 import SwiftUI
 import Combine
+import Quartz
 import SealCore
 
 // MARK: - 页面操作层（PDF 工具箱：页面管理 / 度量）
@@ -386,6 +387,118 @@ extension DocumentStore {
         if ok { refreshAfterEdit() }
         return ok
     }
+
+    // MARK: 转黑白（系统 Gray Tone Quartz 滤镜矢量转换，文字层原样保留）
+
+    /// 转黑白诊断日志（轻量常开）：复现「弹窗点不动」类问题时看 /tmp/mpdf_gray.log
+    func grayLog(_ msg: String) {
+        let line = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium) + " " + msg + "\n"
+        if let fh = FileHandle(forWritingAtPath: "/tmp/mpdf_gray.log") {
+            fh.seekToEndOfFile(); fh.write(line.data(using: .utf8)!); fh.closeFile()
+        } else {
+            try? line.write(toFile: "/tmp/mpdf_gray.log", atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// 灰度结果文档：页面挪入活文档后仍引用来源文档的数据流，
+    /// 必须持有防野指针（与 flattenRedactions 的 keepers 同一教训）。
+    private static var grayPageKeepers: [PDFDocument] = []
+
+    /// 把指定页转为灰度：系统 Gray Tone Quartz 滤镜矢量转换——只改颜色，文字层 / 批注 /
+    /// 矢量图形原样保留，体积基本不变（与 ColorSync 实用工具同源）。
+    /// 整本单上下文一次转换：共享资源（字体等）只嵌入一份——若按页生成小 PDF 再拼回，
+    /// 每页会自带整套字体子集（实测 10 页合同 245K → 1.9M 字体复制 ×10）。
+    /// 后台线程跑（私有快照文档仅该线程使用），逐页报进度、可取消，完成后主线程原地替换。
+    /// 调用前须先 pushPageUndo。completion 回调主线程，n = 实际转换页数。
+    func convertPagesToGray(indices: [Int],
+                            onProgress: @escaping (Int, Int) -> Void,
+                            isCancelled: @escaping () -> Bool,
+                            completion: @escaping (Int) -> Void) {
+        guard let d = document, d.pageCount > 0 else { completion(0); return }
+        let targets = indices.sorted().filter { $0 >= 0 && $0 < d.pageCount }
+        guard !targets.isEmpty else { completion(0); return }
+        // 滤镜随 App 内置（Contents/Resources），系统路径仅作兜底
+        let filterURL = Bundle.main.url(forResource: "Gray Tone", withExtension: "qfilter")
+            ?? URL(fileURLWithPath: "/System/Library/Filters/Gray Tone.qfilter")
+        guard let filter = QuartzFilter(url: filterURL) else {
+            grayLog("引擎启动失败：滤镜加载不了 \(filterURL.path)")
+            completion(0); return
+        }
+        grayLog("引擎启动 targets=\(targets.count) filter=\(filterURL.path)")
+        // 主线程快照（活文档只允许主线程访问），后台只操作快照副本
+        guard let data = d.dataRepresentation(), let work = PDFDocument(data: data) else {
+            completion(0); return
+        }
+        func displayed(_ page: PDFPage) -> CGSize {
+            let b = page.bounds(for: .mediaBox).size
+            let r = Int(page.rotation) % 360
+            return (r == 90 || r == 270) ? CGSize(width: b.height, height: b.width) : b
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // ⚠️ macOS 27 实测坑：beginPDFPage 的单页 kCGPDFContextMediaBox 被静默忽略，
+            // 输出页一律继承 CGContext 创建时的 mediaBox（纯 CG 探针复现实锤）。
+            // 因此按显示尺寸分组，每种尺寸一个转换上下文；组内仍单上下文（字体跨页去重）。
+            var groupOrder: [(key: String, size: CGSize)] = []
+            var groupMap: [String: [Int]] = [:]
+            for i in targets {
+                guard let p = work.page(at: i) else { continue }
+                let size = displayed(p)
+                let key = String(format: "%.2fx%.2f", size.width, size.height)
+                if groupMap[key] == nil { groupOrder.append((key, size)) }
+                groupMap[key, default: []].append(i)
+            }
+            var results: [Int: PDFPage] = [:]
+            var keepers: [PDFDocument] = []
+            var cancelled = false
+            var done = 0
+            for group in groupOrder {
+                if isCancelled() { cancelled = true; break }
+                let md = NSMutableData()
+                var box = CGRect(origin: .zero, size: group.size)
+                guard let octx = CGContext(consumer: CGDataConsumer(data: md as CFMutableData)!,
+                                           mediaBox: &box, nil) else { continue }
+                filter.apply(to: octx)
+                for i in groupMap[group.key]! {
+                    if isCancelled() { cancelled = true; break }
+                    guard let p = work.page(at: i) else { continue }
+                    // 上下文 mediaBox 即该组页面显示尺寸；PDFPage.draw 自动处理 /Rotate 与批注外观
+                    octx.beginPDFPage(nil)
+                    p.draw(with: .mediaBox, to: octx)
+                    octx.endPDFPage()
+                    done += 1
+                    let d = done
+                    DispatchQueue.main.async { onProgress(d, targets.count) }
+                }
+                octx.closePDF()
+                if cancelled { break }
+                if let sub = PDFDocument(data: md as Data) {
+                    keepers.append(sub)
+                    for (k, i) in groupMap[group.key]!.enumerated() {
+                        if let gp = sub.page(at: k) { results[i] = gp }
+                    }
+                }
+            }
+            let resultCount = results.count
+            self?.grayLog("引擎转换结束 n=\(resultCount) cancelled=\(cancelled)")
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let live = self.document, !cancelled, resultCount > 0 else {
+                    completion(0); return
+                }
+                // 降序替换防索引位移
+                for i in results.keys.sorted(by: >) {
+                    guard let gp = results[i], i < live.pageCount else { continue }
+                    live.removePage(at: i)
+                    live.insert(gp, at: i)
+                }
+                Self.grayPageKeepers.append(contentsOf: keepers)   // 防野指针
+                self.hasPageEdits = true
+                self.isDirty = true
+                self.revision += 1
+                self.grayLog("引擎替换完成 \(resultCount) 页")
+                completion(resultCount)
+            }
+        }
+    }
 }
 
 // MARK: - 窗口与文件选择辅助
@@ -398,19 +511,46 @@ func appContentWindow() -> NSWindow? {
     return NSApp.windows.first { $0.isVisible && $0.sheetParent == nil }
 }
 
-/// 弹出选择 PDF 文件面板，返回 (URL, 页数)；取消或无效文件返回 nil。
-/// 必须用 runModal 而非 beginSheetModal：调用方（插入弹窗）本身已是 sheet，
-/// 一张窗口同时只能挂一张 sheet，再嵌套文件面板会静默失败（按钮点了没反应）；
-/// runModal 是独立模态窗口，任何场景都可靠。
-func pickPDFFile(message: String) -> (url: URL, pageCount: Int)? {
+/// 诊断日志（常开轻量，/tmp/mpdf_dbg.log）：弹窗生命周期、点击、面板、CloseGuard 全打点
+func dbgLog(_ s: String) {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss.SSS"
+    let line = f.string(from: Date()) + " " + s + "\n"
+    let path = "/tmp/mpdf_dbg.log"
+    if let fh = FileHandle(forWritingAtPath: path) {
+        fh.seekToEndOfFile()
+        fh.write(line.data(using: .utf8)!)
+        fh.closeFile()
+    } else {
+        try? line.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+}
+
+/// 非模态弹出文件面板（NSOpenPanel / NSSavePanel 通用，回调主线程）。
+/// ⚠️ macOS 26+ 上 sheet 开着时严禁 runModal()：模态会话与 SwiftUI sheet 冲突，
+/// 会把整个 App 事件流锁死（主线程停在模态等待、所有窗口点击无效，只能强退）。
+/// 旧注释「runModal 任何场景都可靠」在 macOS 27 实测失效，反向变成锁死元凶。
+/// begin() 是独立浮窗、不接管事件循环，任何嵌套场景都可靠。
+func presentPanel(_ panel: NSSavePanel, then go: @escaping () -> Void) {
+    dbgLog("presentPanel begin \(panel.className)")
+    panel.begin { resp in
+        dbgLog("presentPanel resp=\(resp.rawValue)")
+        if resp == .OK { go() }
+    }
+}
+
+/// 非模态选择一个有效 PDF 文件，回调 (URL, 页数)；取消或无效文件不回调。
+func pickPDFFile(message: String, onPicked: @escaping (URL, Int) -> Void) {
     let panel = NSOpenPanel()
     panel.canChooseFiles = true
     panel.allowsMultipleSelection = false
     panel.allowedContentTypes = [.pdf]
     panel.message = message
-    guard panel.runModal() == .OK, let u = panel.url,
-          let d = PDFDocument(url: u), d.pageCount > 0 else { return nil }
-    return (u, d.pageCount)
+    presentPanel(panel) {
+        guard let u = panel.url,
+              let d = PDFDocument(url: u), d.pageCount > 0 else { return }
+        onPicked(u, d.pageCount)
+    }
 }
 
 /// 统一的「选择文件」虚线卡片（从文件插入 / 交叉插入共用，保证两个弹窗 UI 一致）
@@ -420,8 +560,8 @@ struct SourceFileCard: View {
 
     var body: some View {
         Button {
-            if let r = pickPDFFile(message: L("选择要插入的 PDF")) {
-                onPicked(r.url, r.pageCount)
+            pickPDFFile(message: L("选择要插入的 PDF")) { url, pageCount in
+                onPicked(url, pageCount)
             }
         } label: {
             VStack(spacing: 6) {

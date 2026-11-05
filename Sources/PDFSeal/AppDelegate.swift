@@ -247,6 +247,9 @@ final class CloseGuard: NSObject, NSWindowDelegate {
     static let shared = CloseGuard()
     private weak var previous: NSObjectProtocol?
     private var titleObserver: NSObjectProtocol?
+    /// 只允许接管经 WindowAccessor 注册过的主窗口；轮询扫描时绝碰 sheet / 面板 / 陌生窗口
+    /// （SwiftUI 弹窗窗口 delegate 一旦被外部代理顶掉，弹窗关闭动画会卡死不回调）。
+    private let knownWindows = NSHashTable<NSWindow>.weakObjects()
 
     /// 把本代理挂到窗口上（保留原 delegate 用于转发），并钉住「窗口标题恒为空」——
     /// SwiftUI 每次状态刷新/打开文档都会把标题重设回 app 名（PDF 工具箱），
@@ -256,9 +259,11 @@ final class CloseGuard: NSObject, NSWindowDelegate {
     /// ⚠️ SwiftUI 会在状态刷新时把 window.delegate 夺回 AppKitWindowController，
     /// 挂一次必被覆盖——需配合 didUpdate 常驻守卫（见 AppDelegate 监听）。
     func attach(to window: NSWindow) {
+        knownWindows.add(window)
         if window.delegate !== self {
             previous = window.delegate
             window.delegate = self
+            dbgLog("CloseGuard attach: \(window.className) visible=\(window.isVisible)")
         }
         if titleObserver == nil {
             titleObserver = NotificationCenter.default.addObserver(
@@ -281,6 +286,9 @@ final class CloseGuard: NSObject, NSWindowDelegate {
     /// "Optional<NSWindowDelegate>" 而非具体类名；须用 String(describing: win?.delegate)。
     func attachIfAppropriate(_ win: NSWindow) {
         if win.delegate === self { return }   // 常态快路径：已接管，零成本返回
+        // ⭐ 只接管 WindowAccessor 注册过的主窗口；陌生窗口（含 SwiftUI sheet 窗口）
+        // 一律不碰——曾疑似把弹窗窗口 delegate 顶掉导致弹窗关不掉、之后整窗事件失活。
+        guard knownWindows.contains(win) else { return }
         guard !(win is NSPanel), win.sheetParent == nil, win.isVisible else { return }
         // 取具体类名：existential 须先转 AnyObject 再 type(of:)，否则拿到 "Optional<NSWindowDelegate>"
         let desc = win.delegate.map { "\(type(of: $0 as AnyObject))" } ?? "nil"

@@ -53,6 +53,7 @@ struct FlatMenuLabel: View {
 struct PageManageView: View {
     @EnvironmentObject private var doc: DocumentStore
     @EnvironmentObject private var settings: StampSettings
+    @EnvironmentObject private var seals: SealStore
 
     /// 双击某页 → 切到预览并定位该页（由 ContentView 提供）
     let onOpenPage: (Int) -> Void
@@ -61,10 +62,18 @@ struct PageManageView: View {
     @State private var anchorIndex: Int?      // ⇧ 连选锚点
     @State private var draggingIndex: Int?
     @State private var dropTargetIndex: Int?
+    /// 外部文件拖入的插入间隙（0...pageCount；i = 第 i 页前，i+1 = 第 i 页后）
+    @State private var fileDropGap: Int?
+    /// 各网格单元宽度（外部拖入时按光标左右半区判定插入间隙）
+    @State private var cellWidths: [Int: CGFloat] = [:]
     @State private var scope: PageScope = .selected
     @State private var showMeasure = false
     /// 全局共享缩略图缓存（按文档身份隔离 + 后台预取）：切标签回来零重渲染
     @ObservedObject private var thumbStore = ThumbStore.shared
+    /// 章参数版本号（设置/章库任一变化即 +1，触发缩略图章重合成）
+    @State private var stampRev = 0
+    /// 缩略图章合成缓存（引用类型，body 求值期间同步读写不触发刷新）
+    @State private var stampArt = StampArtCache()
     @State private var status: String?
     @State private var errorText: String?
     // 插入弹窗（工具栏入口，弹窗内自选位置）
@@ -72,6 +81,7 @@ struct PageManageView: View {
     @State private var showInsertClipboard = false
     @State private var showInterleave = false
     @State private var showSplit = false
+    @State private var showGray = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,7 +97,7 @@ struct PageManageView: View {
             MeasureSheet(scope: .selected, selected: selectedIndices)
         }
         .sheet(isPresented: $showInsertFile) {
-            InsertFromFileSheet(fixedAt: nil) { at, url, srcPages in
+            InsertFromFileSheet(fixedAt: nil, currentPage: currentPageForInsert) { at, url, srcPages in
                 performInsert(at: at) { doc.insertPages(from: url, sourcePages: srcPages, at: at) }
             }
         }
@@ -111,12 +121,19 @@ struct PageManageView: View {
                 NSWorkspace.shared.activateFileViewerSelecting(files)
             }
         }
+        .sheet(isPresented: $showGray) {
+            GrayscaleSheet(selected: selectedIndices) { n in
+                status = LF("已将 %d 页转为黑白", n)
+            }
+        }
         .alert(L("出错了"), isPresented: .init(get: { errorText != nil }, set: { if !$0 { errorText = nil } })) {
             Button(L("好"), role: .cancel) {}
         } message: { Text(errorText ?? "") }
         .onChange(of: doc.revision) { _ in
             thumbStore.invalidate(document: doc.document)   // 页序/内容已变，整本失效重渲染
         }
+        .onReceive(settings.objectWillChange) { _ in stampRev += 1 }   // 章参数变化 → 缩略图重合成
+        .onReceive(seals.objectWillChange) { _ in stampRev += 1 }      // 章库变化同理
         .onChange(of: doc.url) { _ in
             // 切换会话（换文档）：选择状态失效；缩略图由 ThumbStore 按文档身份隔离，
             // 新文档载入即预取，旧文档缓存保留（切回即用）
@@ -217,6 +234,10 @@ struct PageManageView: View {
                 .buttonStyle(FlatToolbarButtonStyle())
                 .disabled(doc.url == nil)
                 .help(L("按页数把当前 PDF 拆分为多个文件"))
+            Button { showGray = true } label: { Label(L("黑白"), systemImage: "circle.lefthalf.filled") }
+                .buttonStyle(FlatToolbarButtonStyle())
+                .disabled(doc.document == nil)
+                .help(L("把选中页转为黑白（灰度）；未选中页时作用于全部页"))
 
             Divider().frame(height: 18)
 
@@ -240,14 +261,66 @@ struct PageManageView: View {
 
     private var pageGrid: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 136), spacing: 14)], spacing: 14) {
-                ForEach(pageItems) { item in
-                    pageCell(item)
+            AdaptiveFlowLayout(minCellWidth: 136, spacing: 14) {
+                ForEach(gridEntries) { entry in
+                    switch entry {
+                    case .page(let item): pageCell(item)
+                    case .gap(let g):     gapCell(g)
+                    }
                 }
             }
             .padding(14)
+            .animation(.easeInOut(duration: 0.22), value: fileDropGap)   // 让位动画
             .id(doc.revision)   // 页面编辑后重建单元格，重新触发 onAppear 渲染
+            .onPreferenceChange(CellWidthPreference.self) { cellWidths = $0 }
         }
+        // 网格空白区（单元格之外）的拖入兜底：清除间隙指示
+        .onDrop(of: [UTType.fileURL], delegate: GridEdgeDropDelegate {
+            if fileDropGap != nil { fileDropGap = nil }
+        })
+    }
+
+    /// 网格条目：页单元格 + 外部拖入时的间隙占位
+    private enum PageGridEntry: Identifiable {
+        case page(PageItem)
+        case gap(Int)          // 间隙下标 0...pageCount（插在第 g 页前）
+        var id: String {
+            switch self {
+            case .page(let p): return "p-\(p.id.uuidString)"
+            case .gap(let g):  return "gap-\(g)"
+            }
+        }
+    }
+
+    private var gridEntries: [PageGridEntry] {
+        var entries = pageItems.map { PageGridEntry.page($0) }
+        if let g = fileDropGap, g <= doc.pageCount {
+            entries.insert(.gap(g), at: min(max(g, 0), entries.count))   // 占位插队 → 后续页让位
+        }
+        return entries
+    }
+
+    /// 外部拖入的间隙占位卡：留出可见空位；自身也是投放点（拖进让出的空间后不再闪烁）
+    private func gapCell(_ g: Int) -> some View {
+        VStack(spacing: 5) {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.accentColor.opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [5]))
+                )
+                .aspectRatio(0.707, contentMode: .fit)
+                .frame(maxHeight: 168)
+            Text(" ").font(.caption)   // 与页码行等高，行高一致
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.6)))
+        .contentShape(Rectangle())
+        .onDrop(of: [UTType.fileURL], delegate: PageDropDelegate(
+            target: g,
+            onEnter: { _ in fileDropGap = g },   // 让位后光标落在占位卡上 → 保持间隙
+            onExit: { if fileDropGap == g { fileDropGap = nil } },
+            onDrop: { handleExternalDrop($0, gap: g) }
+        ))
     }
 
     private func pageCell(_ item: PageItem) -> some View {
@@ -259,7 +332,7 @@ struct PageManageView: View {
             : 0.707
         return VStack(spacing: 5) {
             Group {
-                if let img = thumb(at: i) {
+                if let img = stampedThumb(at: i) {
                     Image(nsImage: img)
                         .resizable()
                         .scaledToFit()
@@ -297,15 +370,46 @@ struct PageManageView: View {
             }
         }
         .onAppear { requestThumb(i) }
+        .background(GeometryReader { g in
+            Color.clear.preference(key: CellWidthPreference.self, value: [i: g.size.width])
+        })
         .onDrag {
             draggingIndex = i
             return NSItemProvider(object: "\(i)" as NSString)
         }
-        .onDrop(of: [UTType.text], delegate: PageDropDelegate(
+        .onDrop(of: [UTType.text, UTType.fileURL], delegate: PageDropDelegate(
             target: i,
-            onEnter: { dropTargetIndex = i },
-            onDrop: { completeDrop(to: i) }
+            onEnter: { info in
+                if draggingIndex == nil && info.hasItemsConforming(to: [.fileURL]) {
+                    dropTargetIndex = nil
+                    // 光标在单元格左半 → 插到该页前，右半 → 插到该页后
+                    fileDropGap = info.location.x < (cellWidths[i] ?? 136) / 2 ? i : i + 1
+                } else {
+                    fileDropGap = nil
+                    dropTargetIndex = i
+                }
+            },
+            onExit: {
+                if fileDropGap != nil { fileDropGap = nil }
+            },
+            onDrop: { info in
+                if draggingIndex != nil { return completeDrop(to: i) }
+                return handleExternalDrop(info, gap: min(fileDropGap ?? i, doc.pageCount))
+            }
         ))
+    }
+
+    /// 外部文件拖入统一投放：异步读 URL → 插到指定间隙
+    private func handleExternalDrop(_ info: DropInfo, gap: Int) -> Bool {
+        guard draggingIndex == nil, info.hasItemsConforming(to: [.fileURL]) else { return false }
+        let providers = info.itemProviders(for: [.fileURL])
+        guard !providers.isEmpty else { return false }
+        let at = min(max(gap, 0), doc.pageCount)
+        fileDropGap = nil
+        loadExternalPDFs(providers) { urls in
+            insertExternalFiles(urls, at: at)
+        }
+        return true
     }
 
     /// 高亮集合 = 选中集（切换范围时已物化为选中）
@@ -324,6 +428,22 @@ struct PageManageView: View {
     private func thumb(at index: Int) -> NSImage? {
         guard let d = doc.document else { return nil }
         return thumbStore.image(for: ObjectIdentifier(d), page: index)
+    }
+
+    /// 基础缩略图 + 章合成：盖章界面的章是覆盖层数据，这里把它画进缩略图，
+    /// 页面管理即可实时看到章（位置/角度/透明度与导出结果一致）
+    private func stampedThumb(at index: Int) -> NSImage? {
+        guard let base = thumb(at: index) else { return nil }
+        guard doc.pageSizes.indices.contains(index),
+              let layer = stampArt.stampLayer(doc: doc.document!, docRev: doc.revision, stampRev: stampRev,
+                                              settings: settings, seals: seals,
+                                              pageSizes: doc.pageSizes, pageCount: doc.pageCount),
+              layer.placements.contains(where: { $0.pageIndex == index }) else { return base }
+        return stampArt.composited(page: index, base: base, stampRev: stampRev) {
+            StampThumbComposer.compose(base: base, pageIndex: index,
+                                       placements: layer.placements, images: layer.images,
+                                       pageSize: doc.pageSizes[index])
+        }
     }
 
     // MARK: 缩略图异步渲染（全局缓存 + 后台限流预取，主线程零阻塞）
@@ -470,11 +590,13 @@ struct PageManageView: View {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = L("提取页")
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        if doc.extractPages(targets, to: url) {
-            status = LF("已提取 %d 页 → %@", targets.count, url.lastPathComponent)
-        } else {
-            errorText = L("提取失败")
+        presentPanel(panel) {
+            guard let url = panel.url else { return }
+            if doc.extractPages(targets, to: url) {
+                status = LF("已提取 %d 页 → %@", targets.count, url.lastPathComponent)
+            } else {
+                errorText = L("提取失败")
+            }
         }
     }
 
@@ -486,18 +608,138 @@ struct PageManageView: View {
         apply(shiftMapping(total: doc.pageCount - n, insertAt: at, count: n))
         status = LF("已粘贴 %d 页", n)
     }
+
+    /// 「当前页」：最后点选的页（仍是选中集时）；否则取第一选中页；无选中 = nil
+    private var currentPageForInsert: Int? {
+        if let a = anchorIndex, selectedIndices.contains(a) { return a }
+        return selectedIndices.first
+    }
+
+    // MARK: 外部 PDF 拖入插入
+
+    /// 异步读取拖入的文件 URL（Finder 拖拽 payload）
+    private func loadExternalPDFs(_ providers: [NSItemProvider], _ done: @escaping ([URL]) -> Void) {
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var urls: [URL] = []
+        for p in providers {
+            group.enter()
+            p.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                if let data = item as? Data, let u = URL(dataRepresentation: data, relativeTo: nil) {
+                    lock.lock(); urls.append(u); lock.unlock()
+                } else if let u = item as? URL {
+                    lock.lock(); urls.append(u); lock.unlock()
+                }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { done(urls) }
+    }
+
+    /// 把拖入的 PDF 插到指定间隙，后续页自动后移；插入后自动选中插入的页。
+    private func insertExternalFiles(_ urls: [URL], at gap: Int) {
+        let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+        guard !pdfs.isEmpty else { return }
+        let at = min(max(gap, 0), doc.pageCount)
+        doc.pushPageUndo(stampState: settings.capturePageState())
+        var n = 0
+        for u in pdfs {
+            n += doc.insertPages(from: u, at: at + n)
+        }
+        guard n > 0 else {
+            errorText = L("没有可插入的内容"); return
+        }
+        apply(shiftMapping(total: doc.pageCount - n, insertAt: at, count: n))
+        // 自动选中插入的页（apply 已清空选择，这里重新置上）
+        selection = Set((at..<min(at + n, doc.pageIDs.count)).map { doc.pageIDs[$0] })
+        anchorIndex = at
+        status = LF("已插入 %d 页（拖入）", n)
+    }
 }
 
-// MARK: - 网格拖放 Delegate
+// MARK: - 网格拖放 Delegate（内部页排序 = text；外部文件插入 = fileURL）
 
 private struct PageDropDelegate: DropDelegate {
     let target: Int
-    let onEnter: () -> Void
-    let onDrop: () -> Bool
+    let onEnter: (DropInfo) -> Void
+    let onExit: () -> Void
+    let onDrop: (DropInfo) -> Bool
 
+    func dropEntered(info: DropInfo) { onEnter(info) }
+    func dropExited(info: DropInfo) { onExit() }
+    func performDrop(info: DropInfo) -> Bool { onDrop(info) }
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        // 外部文件显示复制徽标，内部排序显示移动
+        DropProposal(operation: info.hasItemsConforming(to: [.fileURL]) ? .copy : .move)
+    }
+}
+
+/// 网格空白区兜底：拖出单元格后清除间隙指示（不承接投放）
+private struct GridEdgeDropDelegate: DropDelegate {
+    let onEnter: () -> Void
     func dropEntered(info: DropInfo) { onEnter() }
-    func performDrop(info: DropInfo) -> Bool { onDrop() }
-    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func performDrop(info: DropInfo) -> Bool { false }
+}
+
+// MARK: - 自适应流式网格 Layout（非懒加载 → 位置变化可动画，拖入插入时页面平滑让位）
+
+struct AdaptiveFlowLayout: Layout {
+    var minCellWidth: CGFloat = 136
+    var spacing: CGFloat = 14
+
+    struct Arrangement {
+        var positions: [CGPoint]
+        var proposals: [ProposedViewSize]
+        var size: CGSize
+    }
+
+    /// 逐行布点：列数自适应宽度，每个子视图按列宽等宽、按自身内容定高
+    func arrange(width: CGFloat, subviews: Subviews) -> Arrangement {
+        let avail = max(width, minCellWidth)
+        let cols = max(1, Int((avail + spacing) / (minCellWidth + spacing)))
+        let colW = (avail - spacing * CGFloat(cols - 1)) / CGFloat(cols)
+        var positions: [CGPoint] = []
+        var proposals: [ProposedViewSize] = []
+        var x: CGFloat = 0, y: CGFloat = 0, rowH: CGFloat = 0
+        for sub in subviews {
+            if x > 0 && x + colW > avail + 0.5 {   // 换行
+                x = 0
+                y += rowH + spacing
+                rowH = 0
+            }
+            let h = sub.sizeThatFits(ProposedViewSize(width: colW, height: nil)).height
+            positions.append(CGPoint(x: x, y: y))
+            proposals.append(ProposedViewSize(width: colW, height: h))
+            x += colW + spacing
+            rowH = max(rowH, h)
+        }
+        return Arrangement(positions: positions,
+                           proposals: proposals,
+                           size: CGSize(width: avail, height: y + rowH))
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrange(width: proposal.width ?? 0, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let a = arrange(width: bounds.width, subviews: subviews)
+        for i in subviews.indices {
+            subviews[i].place(
+                at: CGPoint(x: bounds.minX + a.positions[i].x, y: bounds.minY + a.positions[i].y),
+                anchor: .topLeading,
+                proposal: a.proposals[i]
+            )
+        }
+    }
+}
+
+/// 单元格宽度上报（外部拖入时按光标半区判定插入间隙）
+private struct CellWidthPreference: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] = [:]
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue()) { _, new in new }
+    }
 }
 
 // MARK: - 度量：实测画幅 → 改宽高（mm）→ 九宫格锚点 → 应用
@@ -611,6 +853,7 @@ struct MeasureSheet: View {
                     .buttonStyle(DialogButtonStyle())
                 Button(L("应用")) { applyMeasure() }.keyboardShortcut(.defaultAction)
                     .buttonStyle(DialogButtonStyle(prominent: true))
+                    .disabled(targets.isEmpty)
             }
         }
         .padding(20)
@@ -648,6 +891,9 @@ struct MeasureSheet: View {
     }
 
     private func applyMeasure() {
+        guard !targets.isEmpty else {
+            errorText = L("请先选择页"); return
+        }
         guard let w = Double(widthMm), let h = Double(heightMm), w > 10, h > 10 else {
             errorText = L("请输入有效的宽高（mm，需大于 10）"); return
         }
@@ -666,20 +912,22 @@ struct MeasureSheet: View {
 // MARK: - 插入位置（弹窗共用模型 + 选择器）
 
 struct InsertPosition: Equatable {
-    enum Anchor: Hashable { case first, last, custom }
+    enum Anchor: Hashable { case first, last, current, custom }
 
     var anchor: Anchor = .last
     var customPage: Int = 1
     var after: Bool = true
 
-    /// 解析为 0-based 插入间隙下标；fixedAt 非 nil 时直接采用
-    func resolve(total: Int, fixedAt: Int?) -> Int {
+    /// 解析为 0-based 插入间隙下标；fixedAt 非 nil 时直接采用。
+    /// current = 「当前页」（网格中选中页的 0-based 下标），未选中时回退末尾。
+    func resolve(total: Int, fixedAt: Int?, current: Int? = nil) -> Int {
         if let f = fixedAt { return min(max(f, 0), total) }
         let a: Int
         switch anchor {
-        case .first: a = 0
-        case .last: a = max(total - 1, 0)
-        case .custom: a = min(max(customPage, 1), max(total, 1)) - 1
+        case .first:   a = 0
+        case .last:    a = max(total - 1, 0)
+        case .current: a = min(max(current ?? total - 1, 0), max(total - 1, 0))
+        case .custom:  a = min(max(customPage, 1), max(total, 1)) - 1
         }
         return after ? a + 1 : a
     }
@@ -692,19 +940,38 @@ struct InsertPosition: Equatable {
     }
 }
 
-/// 「页面：第一页/最后一页/自定义 + 位置：之前/之后」选择器（学习 UPDF 弹窗布局）
+/// 「页面：第一页/最后一页/当前页/自定义 + 位置：之前/之后」选择器（学习 UPDF 弹窗布局）
 struct InsertPositionPicker: View {
     @Binding var pos: InsertPosition
     let total: Int
     var rowSpacing: CGFloat = 6
+    /// 是否提供「当前页」选项（从文件插入弹窗用）
+    var includeCurrent: Bool = false
+    /// 网格中选中页的 0-based 下标；nil = 无选中（「当前页」置灰不可选）
+    var currentPage: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: rowSpacing) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(L("页面")).foregroundStyle(.secondary)
-                Picker("", selection: $pos.anchor) {
+                // 「当前页」无选中时拦截选中（radioGroup 不支持单选项 disable，绑定居中拦截）
+                Picker("", selection: Binding(
+                    get: { pos.anchor },
+                    set: { new in
+                        if new == .current && currentPage == nil { return }
+                        pos.anchor = new
+                    }
+                )) {
                     Text(L("第一页")).tag(InsertPosition.Anchor.first)
                     Text(L("最后一页")).tag(InsertPosition.Anchor.last)
+                    if includeCurrent {
+                        Text(L("当前页"))
+                            .tag(InsertPosition.Anchor.current)
+                            .foregroundStyle(currentPage == nil
+                                             ? AnyShapeStyle(Color(nsColor: .disabledControlTextColor))
+                                             : AnyShapeStyle(Color.primary))
+                            .help(currentPage == nil ? L("先在网格中选中一页后可用") : "")
+                    }
                     Text(L("自定义")).tag(InsertPosition.Anchor.custom)
                 }
                 .pickerStyle(.radioGroup)
@@ -742,6 +1009,8 @@ struct InsertFromFileSheet: View {
 
     /// 非 nil = 网格间隙加号进入（位置锁定）；nil = 工具栏进入（弹窗内选位置）
     let fixedAt: Int?
+    /// 「当前页」= 网格中选中页（0-based）；nil = 无选中（选项置灰）
+    var currentPage: Int? = nil
     let onInsert: (_ at: Int, _ url: URL, _ sourcePages: [Int]?) -> Void
 
     @State private var sourceURL: URL?
@@ -752,7 +1021,7 @@ struct InsertFromFileSheet: View {
     @State private var errorText: String?
 
     private var insertIndex: Int? {
-        sourceURL == nil ? nil : pos.resolve(total: doc.pageCount, fixedAt: fixedAt)
+        sourceURL == nil ? nil : pos.resolve(total: doc.pageCount, fixedAt: fixedAt, current: currentPage)
     }
 
     var body: some View {
@@ -798,7 +1067,8 @@ struct InsertFromFileSheet: View {
                             .font(.callout)
                             .foregroundStyle(Color.accentColor)
                     } else {
-                        InsertPositionPicker(pos: $pos, total: doc.pageCount, rowSpacing: 12)
+                        InsertPositionPicker(pos: $pos, total: doc.pageCount, rowSpacing: 12,
+                                             includeCurrent: true, currentPage: currentPage)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -818,6 +1088,10 @@ struct InsertFromFileSheet: View {
         }
         .padding(24)
         .frame(width: 600)
+        .onAppear {
+            // 有选中页时默认插到「当前页」之后（与工具栏「插入到选中页之后」口径一致）
+            if currentPage != nil { pos.anchor = .current }
+        }
         .dialogCard()
     }
 
@@ -1240,5 +1514,109 @@ struct SplitSheet: View {
             onDone(files)
             dismiss()
         }
+    }
+}
+
+// MARK: - 转黑白（灰度重绘）
+
+struct GrayscaleSheet: View {
+    @EnvironmentObject private var doc: DocumentStore
+    @EnvironmentObject private var settings: StampSettings
+    @Environment(\.dismiss) private var dismiss
+
+    /// 当前选中页（0-based，来自页面管理网格）；为空时作用范围为全部页
+    let selected: [Int]
+    let onDone: (Int) -> Void
+
+    @State private var running = false
+    @State private var progress: Double = 0
+    @State private var errorText: String?
+    @State private var cancelBox = CancelBox()
+
+    /// 可取消标志（引用类型，供引擎闭包读取）
+    final class CancelBox { var on = false }
+
+    private var targets: [Int] {
+        selected.isEmpty ? Array(0..<doc.pageCount) : selected.filter { $0 < doc.pageCount }
+    }
+
+    private var scopeText: String {
+        selected.isEmpty ? LF("全部 %d 页", doc.pageCount) : LF("选中的 %d 页", targets.count)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(L("转为黑白")).font(.headline)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text(L("作用范围")).foregroundStyle(.secondary)
+                    Text(scopeText).font(.callout)
+                }
+            }
+
+            Text(L("通过内置 Gray Tone 滤镜矢量转换：只改颜色，文字层与批注原样保留（文字仍可选中、可搜索），体积基本不变。可撤销（⌘Z）。"))
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if running {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: progress)
+                    Text(LF("正在转换 %d / %d …", Int(progress * Double(max(targets.count, 1))), targets.count))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let e = errorText { Text(e).font(.callout).foregroundStyle(.red) }
+
+            HStack {
+                Spacer()
+                if running {
+                    Button(L("取消转换"), role: .cancel) { doc.grayLog("点击[取消转换]"); cancelBox.on = true }
+                        .buttonStyle(DialogButtonStyle())
+                } else {
+                    Button(L("取消"), role: .cancel) { doc.grayLog("点击[取消]"); DispatchQueue.main.async { dismiss() } }.keyboardShortcut(.cancelAction)
+                        .buttonStyle(DialogButtonStyle())
+                    Button(L("开始转换")) { doc.grayLog("点击[开始转换]"); start() }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(DialogButtonStyle(prominent: true))
+                        .disabled(targets.isEmpty)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 480)
+        .dialogCard()
+        .onAppear { doc.grayLog("弹窗打开 selected=\(selected.count) pages=\(doc.pageCount)") }
+    }
+
+    private func start() {
+        doc.grayLog("start() 进入")
+        guard doc.document != nil, !running, !targets.isEmpty else {
+            doc.grayLog("start() 被 guard 拦截 doc!=nil:\(doc.document != nil) running:\(running) targets:\(targets.count)")
+            errorText = L("当前状态无法开始转换")
+            return
+        }
+        cancelBox = CancelBox()
+        running = true
+        progress = 0
+        errorText = nil
+        doc.pushPageUndo(stampState: settings.capturePageState())
+        doc.convertPagesToGray(indices: targets,
+            onProgress: { done, total in
+                progress = total > 0 ? Double(done) / Double(total) : 1
+            },
+            isCancelled: { cancelBox.on },
+            completion: { n in
+                doc.grayLog("completion n=\(n) cancelled=\(cancelBox.on)")
+                running = false
+                if n > 0 {
+                    // 先收 sheet，再延迟回写父视图状态，避免展示系统在收起瞬间被父子状态更新打架
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onDone(n) }
+                } else {
+                    errorText = cancelBox.on ? L("已取消，未转换任何页面") : L("没有可转换的页面")
+                }
+            })
     }
 }

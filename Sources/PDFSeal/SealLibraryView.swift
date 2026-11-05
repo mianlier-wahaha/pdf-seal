@@ -117,7 +117,9 @@ struct SealLibraryView: View {
                 if resp == .OK, let url = panel.url { handle(url) }
             }
         } else {
-            if panel.runModal() == .OK, let url = panel.url { handle(url) }
+            presentPanel(panel) {
+                if let url = panel.url { handle(url) }
+            }
         }
     }
 }

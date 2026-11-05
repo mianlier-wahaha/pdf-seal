@@ -22,19 +22,22 @@ struct ContentView: View {
     @State private var entry: MainEntry = ProcessInfo.processInfo.arguments.contains("--probe") ? .edit : .preview
     @State private var statusText: String?
     @State private var errorText: String?
+    @State private var showShareToast = false
+    @State private var shareToastToken = UUID()
     /// 非 nil = 后台保存/另存为进行中（进度 0...1）；同时作为互斥与交互遮罩开关
     @State private var saveProgress: Double?
     /// 工具箱 sheet（工作中心快速入口 / 菜单栏「工具」菜单共用）
     @State private var toolSheet: ToolSheetKind?
 
     enum ToolSheetKind: String, Identifiable {
-        case merge, create
+        case merge, images, clipboard
         var id: String { rawValue }
     }
     @State private var exportTool: ExportToolKind?
     @ObservedObject private var undoCenter = UndoCenter.shared   // 全局撤销/重做按钮态
 
-    var body: some View {
+    /// 主体视图 + 错误弹窗 + 两个工具 sheet（拆出减轻 body 链的类型检查压力）
+    private var coreView: some View {
         VStack(spacing: 0) {
             // 空白会话不算标签：一个 PDF 都没打开时，整个标签栏（含分隔线）都不显示
             if hasOpenTabs {
@@ -60,22 +63,54 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .menuOpenPDF)) { _ in pickPDF() }
         .onReceive(NotificationCenter.default.publisher(for: .menuSavePDF)) { _ in if doc.document != nil { saveInPlace() } }
         .onReceive(NotificationCenter.default.publisher(for: .menuSaveAsPDF)) { _ in if doc.document != nil { exportPDF() } }
+        .onReceive(NotificationCenter.default.publisher(for: .menuPrintPDF)) { _ in if doc.document != nil { printPDF() } }
+        .onReceive(NotificationCenter.default.publisher(for: .menuSharePDF)) { _ in shareCurrentFile() }
+        .onReceive(NotificationCenter.default.publisher(for: .menuExportTool)) { note in
+            guard let raw = note.object as? Int, let kind = ExportToolKind(rawValue: raw) else { return }
+            guard doc.document != nil else { return }
+            exportTool = kind
+        }
         .sheet(item: $exportTool) { kind in
+            let _ = dbgLog("ContentView exportTool sheet 出现 kind=\(kind)")
             ExportToolsSheet(kind: kind) { msg in statusText = msg }
         }
         .sheet(item: $toolSheet) { kind in
             switch kind {
             case .merge: MergeFilesView(onOpen: openPDF)
-            case .create: CreatePDFView(onOpen: openPDF)
+            case .images: ImagesToPDFView(onOpen: openPDF)
+            case .clipboard: ClipboardToPDFView(onOpen: openPDF)
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .menuToolEdit)) { _ in entry = .edit }
-        .onReceive(NotificationCenter.default.publisher(for: .menuToolPageManage)) { _ in entry = .pageManage }
-        .onReceive(NotificationCenter.default.publisher(for: .menuToolStamp)) { _ in entry = .stamp }
-        .onReceive(NotificationCenter.default.publisher(for: .menuToolRedact)) { _ in entry = .edit }
-        .onReceive(NotificationCenter.default.publisher(for: .menuMergeFiles)) { _ in toolSheet = .merge }
-        .onReceive(NotificationCenter.default.publisher(for: .menuCreatePDF)) { _ in toolSheet = .create }
-        .overlay {
+    }
+
+    var body: some View {
+        coreView
+            .onReceive(NotificationCenter.default.publisher(for: .menuToolEdit)) { _ in entry = .edit }
+            .onReceive(NotificationCenter.default.publisher(for: .menuToolPageManage)) { _ in entry = .pageManage }
+            .onReceive(NotificationCenter.default.publisher(for: .menuToolStamp)) { _ in entry = .stamp }
+            .onReceive(NotificationCenter.default.publisher(for: .menuToolRedact)) { _ in entry = .edit }
+            .onReceive(NotificationCenter.default.publisher(for: .menuMergeFiles)) { _ in toolSheet = .merge }
+            .onReceive(NotificationCenter.default.publisher(for: .menuImagesToPDF)) { _ in toolSheet = .images }
+            .onReceive(NotificationCenter.default.publisher(for: .menuClipboardToPDF)) { _ in toolSheet = .clipboard }
+            .overlay {
+                // 分享成功提示：1 秒自动消失（重复点击时以最新 token 为准）
+                if showShareToast {
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundStyle(.white)
+                        Text(L("文件已复制，到指定位置粘贴即可。"))
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 18)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.black.opacity(0.75)))
+                    .shadow(color: .black.opacity(0.25), radius: 10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
+            }
+            .overlay {
             // 后台保存进度：半透明遮罩挡住交互（保存期间禁止编辑，防止与写盘竞态）
             if let p = saveProgress {
                 ZStack {
@@ -160,11 +195,15 @@ struct ContentView: View {
                     .handCursor()
                 Button { printPDF() } label: { toolLabel("printer", L("打印")) }
                     .disabled(doc.document == nil)
-                    .keyboardShortcut("p", modifiers: .command)
+                    // ⌘P 归「文件」菜单所有（避免与菜单加速键重复触发）
                     .help(L("打印当前 PDF（⌘P）"))
                     .handCursor()
+                Button { shareCurrentFile() } label: { toolLabel("square.and.arrow.up", L("分享")) }
+                    .disabled(doc.url == nil)
+                    .help(L("复制当前 PDF 文件到剪贴板（可直接粘贴到微信/邮件）"))
+                    .handCursor()
                 Menu {
-                    Button(L("压缩…")) { exportTool = .compress }
+                    Button(L("压缩大小…")) { exportTool = .compress }
                         .disabled(doc.document == nil)
                     Button(L("设置密码…")) { exportTool = .encrypt }
                         .disabled(doc.document == nil)
@@ -287,7 +326,8 @@ struct ContentView: View {
             if doc.document == nil {
                 WorkspaceHomeView(onOpen: openPDF, onPick: pickPDF,
                                   onMerge: { toolSheet = .merge },
-                                  onCreate: { toolSheet = .create })
+                                  onImages: { toolSheet = .images },
+                                  onClipboard: { toolSheet = .clipboard })
         } else {
             Group {
                 switch entry {
@@ -348,8 +388,10 @@ struct ContentView: View {
                 }
             }
         } else {
-            if panel.runModal() == .OK, let url = panel.url {
-                openPDF(url)
+            presentPanel(panel) {
+                if let url = panel.url {
+                    openPDF(url)
+                }
             }
         }
     }
@@ -367,6 +409,28 @@ struct ContentView: View {
     /// 保存：内存快照后台写回原文件（含「隐藏」批注压平）；有章/水印时再盖章导出覆盖。
     /// 旧实现先 flushPageEdits + flushAnnotations 两次同步写盘，大文档卡 UI 十几秒；
     /// 快照本就携带全部页面+批注改动，一次后台写盘即可同时落两类改动。
+    /// 分享：把当前 PDF 文件复制到剪贴板（访达文件语义，微信/邮件等可直接粘贴）
+    private func shareCurrentFile() {
+        guard let url = doc.url else { errorText = L("请先保存当前 PDF"); return }
+        // 有未保存编辑先落盘（后台写入）；剪贴板放的是文件引用，粘贴方读取时保存早已完成
+        if doc.isDirty || doc.hasPageEdits || doc.hasAnnotationEdits { saveInPlace() }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects([url as NSURL])
+        showShareCopiedToast()
+    }
+
+    /// 分享成功 HUD：显示 1 秒自动关闭
+    private func showShareCopiedToast() {
+        shareToastToken = UUID()
+        withAnimation(.easeOut(duration: 0.15)) { showShareToast = true }
+        let token = shareToastToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            guard token == shareToastToken else { return }
+            withAnimation(.easeIn(duration: 0.2)) { showShareToast = false }
+        }
+    }
+
     private func saveInPlace() {
         guard let target = doc.url else { errorText = L("请先打开 PDF"); return }
         guard saveProgress == nil else { return }   // 已有保存进行中
@@ -539,57 +603,7 @@ struct ContentView: View {
     // MARK: 盖章导出
 
     private func buildPlacements() throws -> (placements: [StampPlacement], seals: [Int: CGImage]) {
-        var pls: [StampPlacement] = []
-        var sealImages: [Int: CGImage] = [:]
-        var key = 0
-
-        // 骑缝章：每条实例使用各自锁定的印章与位置
-        for q in settings.qifengStamps {
-            guard let qCG = seals.cgImage(for: q.sealID) else { continue }
-            var c = QifengConfig()
-            c.edge = q.edge
-            c.range = q.effectiveRange(pageCount: doc.pageCount)
-            c.sizeRatio = CGFloat(q.size)
-            c.offset = CGFloat(q.offset)
-            c.firstPageLarger = q.firstPageLarger
-            c.firstPageRatio = CGFloat(q.firstPageRatio)
-            c.middleRatioEnabled = q.middleRatioEnabled
-            c.middleRatio = CGFloat(q.middleRatio)
-            let qAspect = seals.aspect(for: q.sealID)
-            for var pl in StampGeometry.qifeng(config: c,
-                                               pageSizes: doc.pageSizes, sealAspect: qAspect,
-                                               opacity: CGFloat(settings.qifengOpacity))
-                .filter({ !q.removedPages.contains($0.pageIndex) }) {
-                pl.sealKey = key
-                pls.append(pl)
-            }
-            sealImages[key] = qCG
-            key += 1
-        }
-
-        // 正文章：每枚实例使用各自锁定的印章
-        for inst in settings.fullStamps {
-            guard let cg = seals.cgImage(for: inst.sealID) else { continue }
-            let a = seals.aspect(for: inst.sealID)
-            var c = FullStampConfig()
-            c.anchor = inst.anchor
-            let pageH = doc.pageSizes[c.range.lowerBound].height
-            c.sizeRatio = CGFloat(inst.heightCm * 28.3465 / pageH)
-            c.rotation = CGFloat(inst.rotation)
-            c.range = inst.effectiveRange(pageCount: doc.pageCount)
-            for var pl in StampGeometry.full(config: c,
-                                             pageSizes: doc.pageSizes, sealAspect: a,
-                                             opacity: CGFloat(inst.opacity))
-                .filter({ !inst.removedPages.contains($0.pageIndex) }) {
-                pl.sealKey = key
-                pls.append(pl)
-            }
-            sealImages[key] = cg
-            key += 1
-        }
-
-        if pls.isEmpty { throw SealError.badSealImage }
-        return (pls, sealImages)
+        try StampPlanner.build(settings: settings, seals: seals, pageSizes: doc.pageSizes, pageCount: doc.pageCount)
     }
 }
 

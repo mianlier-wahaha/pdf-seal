@@ -192,7 +192,7 @@ struct ExportToolsSheet: View {
             Text(L("导出工具")).font(.headline)
 
             Picker("", selection: $kind) {
-                Text(L("压缩")).tag(ExportToolKind.compress)
+                Text(L("压缩大小")).tag(ExportToolKind.compress)
                 Text(L("设置密码")).tag(ExportToolKind.encrypt)
                 Text(L("导出为图片")).tag(ExportToolKind.images)
                 Text(L("图像型 PDF")).tag(ExportToolKind.imagePDF)
@@ -222,7 +222,10 @@ struct ExportToolsSheet: View {
 
             HStack {
                 Spacer()
-                Button(L("取消"), role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(L("取消"), role: .cancel) {
+                    dbgLog("导出sheet 点击[取消] kind=\(kind)")
+                    DispatchQueue.main.async { dismiss() }
+                }.keyboardShortcut(.cancelAction)
                     .buttonStyle(DialogButtonStyle())
                 Button(actionLabel) { runTool() }
                     .keyboardShortcut(.defaultAction)
@@ -233,6 +236,9 @@ struct ExportToolsSheet: View {
         .padding(22)
         .frame(width: 480)
         .dialogCard()
+        .onAppear { dbgLog("导出sheet 出现 kind=\(kind) pages=\(pageCount)") }
+        .onDisappear { dbgLog("导出sheet 消失") }
+        .onChange(of: kind) { k in dbgLog("导出sheet 切换标签 → \(k)") }
     }
 
     private var actionLabel: String {
@@ -348,6 +354,7 @@ struct ExportToolsSheet: View {
     // MARK: 执行
 
     private func runTool() {
+        dbgLog("导出sheet 点击[执行] kind=\(kind)")
         errorText = nil
         guard let d = doc.document else { return }
         switch kind {
@@ -384,8 +391,9 @@ struct ExportToolsSheet: View {
         panel.directoryURL = doc.url?.deletingLastPathComponent()
         panel.nameFieldStringValue = "\(stem)-\(L("压缩")).pdf"
         panel.allowedContentTypes = [.pdf]
-        guard panel.runModal() == .OK, let target = panel.url else { return }
-        background { [weak doc] in
+        presentPanel(panel) {
+            guard let target = panel.url else { return }
+            background { [weak doc] in
             guard let doc else { return nil }
             let before = srcFileSize(of: doc.url)
             let data = d.dataRepresentation() ?? Data()
@@ -422,6 +430,7 @@ struct ExportToolsSheet: View {
                       ByteCountFormatter.string(fromByteCount: Int64(before), countStyle: .file),
                       ByteCountFormatter.string(fromByteCount: Int64(after), countStyle: .file))
         } progress: { v in progressValue = v }
+        }
     }
 
     // 加密：PDFKit 写出选项（矢量无损，批注保留）
@@ -438,23 +447,25 @@ struct ExportToolsSheet: View {
         panel.directoryURL = doc.url?.deletingLastPathComponent()
         panel.nameFieldStringValue = "\(stem)-\(L("加密")).pdf"
         panel.allowedContentTypes = [.pdf]
-        guard panel.runModal() == .OK, let target = panel.url else { return }
-        background { [weak doc] in
-            guard let doc else { return nil }
-            let data = d.dataRepresentation() ?? Data()
-            guard let dd = PDFDocument(data: data) else { return L("加密失败：无法读取文档") }
-            let ok = dd.write(to: target, withOptions: [
-                .userPasswordOption: open,                      // 空 = 打开不需密码
-                .ownerPasswordOption: edit.isEmpty ? open : edit,
-            ])
-            guard ok else { return L("加密失败：写入被拒绝") }
-            let tail: String
-            switch (!open.isEmpty, !edit.isEmpty) {
-            case (true, true):   tail = L("打开与编辑均需密码")
-            case (true, false):  tail = L("打开需密码")
-            default:             tail = L("可直接打开阅读，编辑需密码")
+        presentPanel(panel) {
+            guard let target = panel.url else { return }
+            background { [weak doc] in
+                guard let doc else { return nil }
+                let data = d.dataRepresentation() ?? Data()
+                guard let dd = PDFDocument(data: data) else { return L("加密失败：无法读取文档") }
+                let ok = dd.write(to: target, withOptions: [
+                    .userPasswordOption: open,                      // 空 = 打开不需密码
+                    .ownerPasswordOption: edit.isEmpty ? open : edit,
+                ])
+                guard ok else { return L("加密失败：写入被拒绝") }
+                let tail: String
+                switch (!open.isEmpty, !edit.isEmpty) {
+                case (true, true):   tail = L("打开与编辑均需密码")
+                case (true, false):  tail = L("打开需密码")
+                default:             tail = L("可直接打开阅读，编辑需密码")
+                }
+                return LF("已加密导出：%@（%@）", target.lastPathComponent, tail)
             }
-            return LF("已加密导出：%@（%@）", target.lastPathComponent, tail)
         }
     }
 
@@ -465,31 +476,33 @@ struct ExportToolsSheet: View {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.message = L("选择图片输出文件夹")
-        guard panel.runModal() == .OK, let dir = panel.url else { return }
-        let useJPG = imageFormat == 1
-        let dpi = ExportToolsSheet.dpiTable[imageDPI]
-        let ext = useJPG ? "jpg" : "png"
-        let stem = doc.url?.deletingPathExtension().lastPathComponent ?? "文档"
-        background { [weak doc] in
-            guard let doc else { return nil }
-            let data = d.dataRepresentation() ?? Data()
-            guard let src = PDFRaster.open(data), src.numberOfPages > 0 else { return L("导出失败：无法读取文档") }
-            let digits = max(String(src.numberOfPages).count, 3)
-            for i in 0..<src.numberOfPages {
-                guard let r = PDFRaster.renderPage(src, index: i, dpi: dpi) else { continue }
-                var img = r.image
-                if useJPG { img = PDFRaster.jpeg(img, quality: 0.9) ?? img }
-                let rep = NSBitmapImageRep(cgImage: img)
-                guard let fileData = rep.representation(
-                    using: useJPG ? .jpeg : .png,
-                    properties: useJPG ? [.compressionFactor: 0.9] : [:]) else { continue }
-                let url = dir.appendingPathComponent(
-                    String(format: "%@-%0\(digits)d.%@", stem, i + 1, ext))
-                do { try fileData.write(to: url) } catch { return L("写入失败，请检查目标文件夹是否可写") }
-                let v = Double(i + 1) / Double(src.numberOfPages)
-                DispatchQueue.main.async { self.progressValue = v }
+        presentPanel(panel) {
+            guard let dir = panel.url else { return }
+            let useJPG = imageFormat == 1
+            let dpi = ExportToolsSheet.dpiTable[imageDPI]
+            let ext = useJPG ? "jpg" : "png"
+            let stem = doc.url?.deletingPathExtension().lastPathComponent ?? "文档"
+            background { [weak doc] in
+                guard let doc else { return nil }
+                let data = d.dataRepresentation() ?? Data()
+                guard let src = PDFRaster.open(data), src.numberOfPages > 0 else { return L("导出失败：无法读取文档") }
+                let digits = max(String(src.numberOfPages).count, 3)
+                for i in 0..<src.numberOfPages {
+                    guard let r = PDFRaster.renderPage(src, index: i, dpi: dpi) else { continue }
+                    var img = r.image
+                    if useJPG { img = PDFRaster.jpeg(img, quality: 0.9) ?? img }
+                    let rep = NSBitmapImageRep(cgImage: img)
+                    guard let fileData = rep.representation(
+                        using: useJPG ? .jpeg : .png,
+                        properties: useJPG ? [.compressionFactor: 0.9] : [:]) else { continue }
+                    let url = dir.appendingPathComponent(
+                        String(format: "%@-%0\(digits)d.%@", stem, i + 1, ext))
+                    do { try fileData.write(to: url) } catch { return L("写入失败，请检查目标文件夹是否可写") }
+                    let v = Double(i + 1) / Double(src.numberOfPages)
+                    DispatchQueue.main.async { self.progressValue = v }
+                }
+                return LF("已导出 %d 张图片：%@", src.numberOfPages, dir.path)
             }
-            return LF("已导出 %d 张图片：%@", src.numberOfPages, dir.path)
         }
     }
 
@@ -500,22 +513,24 @@ struct ExportToolsSheet: View {
         panel.directoryURL = doc.url?.deletingLastPathComponent()
         panel.nameFieldStringValue = "\(stem)-\(L("图像版")).pdf"
         panel.allowedContentTypes = [.pdf]
-        guard panel.runModal() == .OK, let target = panel.url else { return }
-        let dpi = ExportToolsSheet.dpiTable[rasterDPI]
-        background { [weak doc] in
-            guard let doc else { return nil }
-            let data = d.dataRepresentation() ?? Data()
-            var last = 0.0
-            let ok = PDFRaster.writeRasterPDF(from: data, dpi: dpi, jpegQuality: 0.9, to: target) { i, n in
-                let v = Double(i) / Double(max(n, 1))
-                if v - last > 0.02 || i == n {
-                    last = v
-                    DispatchQueue.main.async { self.progressValue = v }
+        presentPanel(panel) {
+            guard let target = panel.url else { return }
+            let dpi = ExportToolsSheet.dpiTable[rasterDPI]
+            background { [weak doc] in
+                guard let doc else { return nil }
+                let data = d.dataRepresentation() ?? Data()
+                var last = 0.0
+                let ok = PDFRaster.writeRasterPDF(from: data, dpi: dpi, jpegQuality: 0.9, to: target) { i, n in
+                    let v = Double(i) / Double(max(n, 1))
+                    if v - last > 0.02 || i == n {
+                        last = v
+                        DispatchQueue.main.async { self.progressValue = v }
+                    }
+                    return true
                 }
-                return true
+                guard ok else { return L("生成失败：无法读取文档或写入目标位置") }
+                return LF("已生成图像型 PDF：%@", target.lastPathComponent)
             }
-            guard ok else { return L("生成失败：无法读取文档或写入目标位置") }
-            return LF("已生成图像型 PDF：%@", target.lastPathComponent)
         }
     }
 
